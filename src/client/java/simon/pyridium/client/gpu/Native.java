@@ -22,7 +22,7 @@ public final class Native {
 	private static final ValueLayout.OfInt I = ValueLayout.JAVA_INT;
 
     private static SymbolLookup lib;
-    private static MethodHandle hModelCreate, hModelDestroy, hModelsFrame;
+    private static MethodHandle hModelCreate, hModelDestroy, hModelsFrame, hMaterialFaces;
 	private static final Linker LINKER = Linker.nativeLinker();
 
 	private static MethodHandle hInit, hError, hAlloc, hFree, hUpload, hUpload2d, hDownload2d, hCopy, hCopy2d, hSync, hFill,
@@ -56,6 +56,7 @@ public final class Native {
 		hWorldDestroy = fn("pyd_world_destroy", FunctionDescriptor.ofVoid());
 		hSetLod = fn("pyd_set_lod_generator", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS));
 		hMaterial = fn("pyd_material_define", FunctionDescriptor.of(I, I, L, L, I, I, I, ValueLayout.JAVA_FLOAT, ValueLayout.JAVA_FLOAT));
+        hMaterialFaces = fn("pyd_material_define_faces", FunctionDescriptor.of(I, I, L, L, L, I, I, ValueLayout.JAVA_FLOAT, ValueLayout.JAVA_FLOAT));
 		hSecStates = fn("pyd_sec_states", FunctionDescriptor.of(I, L, L, I));
 		hSecPut = fn("pyd_sec_put", FunctionDescriptor.of(I, I, I, I, L, I));
 		hSecRemove = fn("pyd_sec_remove", FunctionDescriptor.ofVoid(I, I, I));
@@ -265,6 +266,12 @@ public final class Native {
 		}
 	}
 
+    /** Six-face albedo/tint atlas and optional LabPBR normal/material atlases. */
+    public static void materialFaces(int index, long color, long normal, long specular, int size, int flags, float roughness, float emission) {
+        try {
+            check((int)hMaterialFaces.invokeExact(index, color, normal, specular, size, flags, roughness, emission), "material_faces");
+        } catch (Throwable t) { throw wrap(t); }
+    }
 	public static void secStates(long attr, long flags, int count) {
 		try {
 			check((int)hSecStates.invokeExact(attr, flags, count), "sec_states");

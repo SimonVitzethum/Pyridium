@@ -143,7 +143,7 @@ typedef struct PyrTextureData {
     uint32_t reserved_tex_data;
 } PyrTextureData;
 
-#define PYR_MAX_MATERIALS 4096u
+#define PYR_MAX_MATERIALS 16384u
 #define PYR_MATERIAL_MASK_WORDS (PYR_MAX_MATERIALS / 64u)
 typedef struct PyrScene {
     uint64_t nodes, leaves, attributes, geometries;   /* Gerätezeiger */
@@ -186,6 +186,8 @@ typedef struct PyrScene {
 /* Durchbrochen (Laub): festes 3x3-Lochmuster je Voxelfläche, ~30 % Löcher;
  * Strahlen (auch Schatten) laufen durch die Löcher hindurch */
 #define PYR_MATERIAL_CUTOUT 0x10u
+/* Six-face Minecraft atlases; see device/types.zig for tile/channel layout. */
+#define PYR_MATERIAL_FACE_ATLAS 0x20u
 #define PYR_MAX_TRANSPARENT_LAYERS 4u
 #define PYR_VOXEL(material, r, g, b) \
     ((((uint32_t)(r) & 0xFFu) << 24) | (((uint32_t)(g) & 0xFFu) << 16) | (((uint32_t)(b) & 0xFFu) << 8) | ((uint32_t)(material) & 0xFFu))
@@ -323,7 +325,7 @@ extern "C" {
 #endif
 
 #define PYR_VERSION_MAJOR 0
-#define PYR_VERSION_MINOR 3
+#define PYR_VERSION_MINOR 4
 #define PYR_VERSION ((uint32_t)((PYR_VERSION_MAJOR << 16) | PYR_VERSION_MINOR))
 
 #if defined(_WIN32)
@@ -576,6 +578,8 @@ PYR_API PyrResult pyr_material_set(PyrContext* ctx, uint32_t index, const PyrMat
 PYR_API PyrResult pyr_texture_create(PyrContext* ctx, uint32_t width, uint32_t height,
                                      const void* rgba8, uint32_t* out_index);
 PYR_API PyrResult pyr_texture_destroy(PyrContext* ctx, uint32_t index);
+/* A tile recipe references existing, context-owned textures (1..12 indices). */
+PYR_API PyrResult pyr_texture_create_tiles(PyrContext* ctx, const uint32_t* indices, uint32_t count, uint32_t* out_index);
 
 /* Umgebungskarte (equirektangulär, 4 Floats je Texel: RGB + ungenutzt).
  * Pyrit baut daraus die Verteilung fuer das Importance-Sampling, damit auch

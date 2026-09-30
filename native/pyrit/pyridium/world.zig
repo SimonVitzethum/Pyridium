@@ -215,7 +215,7 @@ export fn pyd_world_create(seed: u64, mode: u32) i32 {
     ci.flags |= api.create_material16;
     ci.cuda_context = @ptrCast(G.ctx);
     ci.cuda_stream = @ptrCast(G.stream);
-    ci.max_textures = 16384; // Material16: bis 3 Texturen je Material plus Himmel
+    ci.max_textures = 65536; // Shared face tiles + lightweight material recipes
     // Speicher nach freiem VRAM: Reserve für Ziele, DLSS, Generator und andere Programme,
     // der Rest für die DAG-Pools (40 % Knoten, 35 % Blätter, 25 % Attribute)
     var free_b: usize = 0;
@@ -223,7 +223,11 @@ export fn pyd_world_create(seed: u64, mode: u32) i32 {
     _ = G.drv.cuMemGetInfo_v2(&free_b, &total_b);
     const reserve: usize = 1536 << 20;
     const usable: usize = if (free_b > reserve + (768 << 20)) free_b - reserve else 768 << 20;
-    const pools = usable * 6 / 10;
+    // WorldStats in the 1024-chunk Full-HD run use ~200 MiB. Reserving most
+    // VRAM for mostly-empty pools starves PBR, RR/replay scratch and worldgen.
+    // Leave the majority for those actual workloads; LOD already reacts to
+    // the measured DAG budget rather than requiring an oversized fixed pool.
+    const pools = usable * 3 / 10;
     ci.node_pool_bytes = pools * 4 / 10;
     ci.leaf_pool_bytes = pools * 35 / 100;
     ci.attribute_pool_bytes = pools * 25 / 100;
@@ -410,6 +414,7 @@ export fn pyd_world_frame(c: *const CamIn) i32 {
 
 /// Welt verlassen: Pyrit-Welt und -Kontext freigeben (aller Grafikspeicher)
 export fn pyd_world_destroy() void {
+    @import("materials.zig").reset();
     root.bind();
     if (!S.ready) return;
     lod_cb = null;

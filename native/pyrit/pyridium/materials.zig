@@ -12,6 +12,44 @@ const root = @import("root.zig");
 const Budget = @import("test_budget").Budget;
 
 const gpa = std.heap.c_allocator;
+const TileKey = struct { size: u32, hash: u64 };
+const Tile = struct { pixels: []u8, index: u32 };
+var tiles: std.AutoHashMapUnmanaged(TileKey, std.ArrayList(Tile)) = .empty;
+var recipes: std.AutoHashMapUnmanaged([12]u32, u32) = .empty;
+
+/// Texture handles belong to the world context; host collision-check copies
+/// and recipes must not survive that context (including resource-pack reload).
+pub fn reset() void {
+    var it = tiles.valueIterator();
+    while (it.next()) |list| {
+        for (list.items) |t| gpa.free(t.pixels);
+        list.deinit(gpa);
+    }
+    tiles.deinit(gpa);
+    recipes.deinit(gpa);
+    tiles = .empty;
+    recipes = .empty;
+}
+
+fn sharedTile(ctx: ?*anyopaque, data: []const u8, size: u32) !u32 {
+    var pixels = data;
+    var dimension = size;
+    // Uniform tint/flat normal tiles need only one texel, independent of size.
+    var uniform = true;
+    var i: usize = 4;
+    while (i < data.len) : (i += 4) if (!std.mem.eql(u8, data[0..4], data[i..][0..4])) { uniform = false; break; };
+    if (uniform) { pixels = data[0..4]; dimension = 1; }
+    const key = TileKey{ .size = dimension, .hash = std.hash.Wyhash.hash(0, pixels) };
+    const entry = try tiles.getOrPut(gpa, key);
+    if (!entry.found_existing) entry.value_ptr.* = .empty;
+    for (entry.value_ptr.items) |tile| if (std.mem.eql(u8, tile.pixels, pixels)) return tile.index;
+    const handle = texture(ctx, pixels, dimension, dimension);
+    if (handle == 0) return error.TextureUpload;
+    const copy = try gpa.dupe(u8, pixels);
+    errdefer gpa.free(copy);
+    try entry.value_ptr.append(gpa, .{ .pixels = copy, .index = handle });
+    return handle;
+}
 
 pub const flag_cutout: u32 = 1;
 pub const flag_water: u32 = 2;
@@ -79,6 +117,60 @@ fn texture(ctx: ?*anyopaque, rgba: []const u8, w: u32, h: u32) u32 {
     var idx: u32 = 0;
     if (pyrit.pyr_texture_create(@ptrCast(ctx), w, h, rgba.ptr, &idx) != 0) return 0;
     return idx;
+}
+
+/// Flip EACH face, not the atlas: face indices must stay unchanged.
+fn faceTexture(ctx: ?*anyopaque, src: [*]const u8, size: u32, count: u32, linear_color: bool) !u32 {
+    const bytes = @as(usize, size) * size * 4;
+    var indices = [_]u32{0} ** 12;
+    for (0..count) |face| {
+        const tile = try flipped(src + face * bytes, size, size);
+        defer gpa.free(tile);
+        if (linear_color) toLinear(tile);
+        indices[face] = try sharedTile(ctx, tile, size);
+    }
+    if (recipes.get(indices)) |handle| return handle;
+    var handle: u32 = 0;
+    if (pyrit.pyr_texture_create_tiles(@ptrCast(ctx), &indices, count, &handle) != 0) return error.TextureUpload;
+    try recipes.put(gpa, indices, handle);
+    return handle;
+}
+
+/// Small, unified Minecraft material interface. Optional maps are LabPBR 1.3,
+/// not gamma-corrected RGB and not auto-generated relief from the albedo.
+export fn pyd_material_define_faces(index: u32, color: [*]const u8, normal: ?[*]const u8, specular: ?[*]const u8, size: u32, flags: u32, roughness: f32, emission: f32) i32 {
+    root.bind();
+    const start = Budget.now();
+    defer { _ = world.restTest(start); }
+    const ctx = world.context() orelse return -1;
+    if (index >= types.max_materials or size < 1 or size > 256 or size & (size - 1) != 0 or
+        !std.math.isFinite(roughness) or !std.math.isFinite(emission)) return -1;
+    var m: types.Material = undefined;
+    pyrit.pyr_material_default(&m);
+    m.flags = types.material_voxel_color | types.material_face_atlas;
+    m.texture_scale = 1;
+    m.roughness = roughness;
+    m.texture = faceTexture(ctx, color, size, 12, true) catch return -1;
+    if (normal) |n| m.normal_texture = faceTexture(ctx, n, size, 6, false) catch return -1;
+    if (specular) |s| m.side_texture = faceTexture(ctx, s, size, 6, false) catch return -1;
+    if (flags & flag_cutout != 0) {
+        m.flags |= types.material_cutout;
+        m.subsurface = 0.5;
+        m.subsurface_color = .{ 0.5, 0.9, 0.3 };
+    }
+    if (flags & flag_glass != 0) {
+        m.flags |= types.material_transparent;
+        m.ior = 1.5;
+        m.opacity = 0.1;
+        m.density = 0.02;
+        m.roughness = 0.05;
+    }
+    if (flags & flag_emissive != 0) m.emission = .{ emission, emission, emission };
+    if (pyrit.pyr_material_set(@ptrCast(ctx), index, &m) != 0) {
+        root.setError("Material {d}: {s}", .{ index, pyrit.pyr_error_message() });
+        return -1;
+    }
+    return 0;
 }
 
 /// Material `index` (0..4095) festlegen. top/side: RGBA8 w x h (Vanilla-Ausrichtung)

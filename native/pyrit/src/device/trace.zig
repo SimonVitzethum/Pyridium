@@ -42,6 +42,7 @@ pub fn dagOf(s: *const types.Scene, g: *const types.GeometryData) dag.Dag {
     else
         null;
     return .{
+        .cut_scene = s,
         .attribute_format = s.reserved_tex,
         .nodes = nodes + g.node_offset,
         .leaves = leaves + g.leaf_offset,

@@ -252,7 +252,10 @@ pub fn renderPixelWith(tracer: anytype, p: *const types.RenderParams, s: *const 
                 // Laub mit Lochmuster: die Kanten der Lochzellen zählen wie
                 // Voxelkanten, sonst flimmerten die Löcher bei Bewegung
                 const mats: [*]const types.Material = @ptrFromInt(s.materials);
-                const cells: f32 = if (mats[types.materialIndex(s.reserved_tex, h.attribute)].flags & types.material_cutout != 0) @floatFromInt(@import("dag.zig").cutout_cells) else 1;
+                const material = mats[types.materialIndex(s.reserved_tex, h.attribute)];
+                const cells: f32 = if (material.flags & types.material_cutout == 0) 1 else if (material.flags & types.material_face_atlas != 0 and material.texture > 0 and material.texture < s.texture_count)
+                    @floatFromInt(@import("block_texture.zig").tileWidth(s, material.texture, h.face & types.hit_face_mask))
+                else @floatFromInt(@import("dag.zig").cutout_cells);
                 var near_edge = false;
                 inline for (0..3) |a| {
                     if (a != axis) {

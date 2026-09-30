@@ -657,6 +657,18 @@ fn textureDestroy(self: *Context, index: u32) diag.Error!void {
     try self.textureDestroy(index);
 }
 
+fn textureTiles(self: *Context, indices: []const u32, out: *u32) diag.Error!void {
+    out.* = try self.textureTiles(indices);
+}
+
+pub export fn pyr_texture_create_tiles(ctx: ?*PyrContext, indices: ?[*]const u32, count: u32, out_index: ?*u32) Result {
+    diag.clear();
+    const p = indices orelse return code(diag.fail(error.InvalidArgument, "indices is NULL", .{}));
+    const out = out_index orelse return code(diag.fail(error.InvalidArgument, "out_index is NULL", .{}));
+    if (count == 0 or count > 12) return code(diag.fail(error.InvalidArgument, "1..12 tiles required", .{}));
+    return call(ctx, textureTiles, .{ p[0..count], out });
+}
+
 pub export fn pyr_texture_destroy(ctx: ?*PyrContext, index: u32) Result {
     diag.clear();
     return call(ctx, textureDestroy, .{index});

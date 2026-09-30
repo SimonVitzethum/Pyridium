@@ -63,6 +63,13 @@ public final class PyritWorld {
 		}
 		Minecraft mc = Minecraft.getInstance();
 		try {
+            if (created && BlockPalette.resourcesChanged()) {
+                var loaded = new java.util.ArrayList<net.minecraft.world.level.chunk.LevelChunk>();
+                SectionSync.loadedChunks().forEach(loaded::add);
+                levelChanged(mc.level);
+                for (var chunk : loaded) SectionSync.chunkLoaded(mc.level, chunk);
+                LOGGER.info("Pyridium: Ressourcenpakete neu geladen; Material- und Entity-DAG-Caches werden neu aufgebaut");
+            }
 			if (!created) {
 				long seed = 1L;
 				IntegratedServer server = mc.getSingleplayerServer();

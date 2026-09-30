@@ -258,7 +258,8 @@ pub const Context = struct {
     fn_edit_append: cuda.CUfunction = null,
 
     // Materialien und Licht (Host-Kopie + Gerät)
-    materials: [types.max_materials]types.Material = undefined,
+    // Keep the large Material16 table off Java's ~1 MiB native call stack.
+    materials: []types.Material = &.{},
     lighting: types.Lighting = undefined,
     materials_dev: cuda.CUdeviceptr = 0,
     lighting_dev: cuda.CUdeviceptr = 0,
@@ -275,6 +276,7 @@ pub const Context = struct {
     texture_table: cuda.CUdeviceptr = 0,
     texture_data: []cuda.CUdeviceptr = &.{},
     texture_high: u32 = 0,
+    texture_cursor: u32 = 1,
     /// Umgebungskarte und ihre Verteilung
     env_data: cuda.CUdeviceptr = 0,
     env_cond: cuda.CUdeviceptr = 0,
@@ -392,6 +394,7 @@ pub const Context = struct {
     }
 
     fn initResources(self: *Context, info: *const api.CreateInfo) Error!void {
+        self.materials = try oom(self.gpa.alloc(types.Material, types.max_materials));
         const drv = &self.drv;
         if (self.owns_stream) try self.check(drv.cuStreamCreate(&self.stream, cuda.CU_STREAM_NON_BLOCKING), "cuStreamCreate");
 
@@ -488,11 +491,11 @@ pub const Context = struct {
         self.views = try oom(self.gpa.alloc(ViewSlot, max_views));
         @memset(self.views, .{});
 
-        self.materials_dev = try self.devAlloc(@sizeOf(@TypeOf(self.materials)), "Materialien");
+        self.materials_dev = try self.devAlloc(types.max_materials * @sizeOf(types.Material), "Materialien");
         self.lighting_dev = try self.devAlloc(@sizeOf(types.Lighting), "Licht");
-        for (&self.materials) |*m| m.* = defaultMaterial();
+        for (self.materials) |*m| m.* = defaultMaterial();
         self.lighting = defaultLighting();
-        try self.uploadValue(self.materials_dev, &self.materials);
+        try self.upload(self.materials_dev, std.mem.sliceAsBytes(self.materials));
         try self.uploadValue(self.lighting_dev, &self.lighting);
         try self.uploadScene();
 
@@ -639,6 +642,7 @@ pub const Context = struct {
         self.gpa.free(self.geometries);
         self.gpa.free(self.instances);
         self.gpa.free(self.views);
+        self.gpa.free(self.materials);
         self.geometry_free.deinit(self.gpa);
         self.instance_free.deinit(self.gpa);
         self.view_free.deinit(self.gpa);
@@ -2069,7 +2073,7 @@ pub const Context = struct {
         if (w == 0 or h == 0) return fail(error.InvalidArgument, "Textur braucht Breite und Höhe", .{});
         const need = @as(u64, w) * h * 4;
         if (pixels.len < need) return fail(error.InvalidArgument, "Textur {d}x{d} braucht {d} Bytes, bekommen {d}", .{ w, h, need, pixels.len });
-        var slot: u32 = 1;
+        var slot: u32 = self.texture_cursor;
         while (slot < self.texture_data.len and self.texture_data[slot] != 0) slot += 1;
         if (slot >= self.texture_data.len) return fail(error.Capacity, "keine Texturplätze mehr (max_textures erhöhen)", .{});
 
@@ -2139,8 +2143,29 @@ pub const Context = struct {
         const entry = types.TextureData{ .data = buf, .width = w, .height = h, .levels = levels, .reserved_tex_data = 0 };
         try self.uploadValue(self.texture_table + @as(u64, slot) * @sizeOf(types.TextureData), &entry);
         self.texture_data[slot] = buf;
+        self.texture_cursor = slot + 1;
         if (slot >= self.texture_high) self.texture_high = slot + 1;
         self.logf(3, "Textur {d}: {d}x{d}, {d} Stufen, {d} KiB", .{ slot, w, h, levels, total * 4 >> 10 });
+        return slot;
+    }
+
+    /// Tile recipes reference textures owned by this context. Destroy a recipe
+    /// before its tiles; the Minecraft cache keeps both until context teardown.
+    pub fn textureTiles(self: *Context, tiles: []const u32) Error!u32 {
+        if (tiles.len == 0 or tiles.len > 12) return fail(error.InvalidArgument, "1..12 texture tiles required", .{});
+        for (tiles) |t| if (t == 0 or t >= self.texture_high or self.texture_data[t] == 0)
+            return fail(error.InvalidHandle, "Missing tile {d}", .{t});
+        var slot: u32 = self.texture_cursor;
+        while (slot < self.texture_data.len and self.texture_data[slot] != 0) slot += 1;
+        if (slot >= self.texture_data.len) return fail(error.Capacity, "No texture recipe slots", .{});
+        const buf = try self.devAlloc(tiles.len * 4, "Texture tiles");
+        errdefer _ = self.drv.cuMemFree_v2(buf);
+        try self.upload(buf, std.mem.sliceAsBytes(tiles));
+        const entry = types.TextureData{ .data = buf, .width = @intCast(tiles.len), .height = 1, .levels = 1, .reserved_tex_data = types.texture_tile_table };
+        try self.uploadValue(self.texture_table + @as(u64, slot) * @sizeOf(types.TextureData), &entry);
+        self.texture_data[slot] = buf;
+        self.texture_cursor = slot + 1;
+        self.texture_high = @max(self.texture_high, slot + 1);
         return slot;
     }
 
@@ -2150,6 +2175,7 @@ pub const Context = struct {
         try self.check(self.drv.cuStreamSynchronize(self.stream), "cuStreamSynchronize");
         _ = self.drv.cuMemFree_v2(self.texture_data[index]);
         self.texture_data[index] = 0;
+        self.texture_cursor = @min(self.texture_cursor, index);
         const entry = std.mem.zeroes(types.TextureData);
         try self.uploadValue(self.texture_table + @as(u64, index) * @sizeOf(types.TextureData), &entry);
     }

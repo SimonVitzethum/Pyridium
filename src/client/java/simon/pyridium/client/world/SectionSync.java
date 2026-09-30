@@ -150,7 +150,7 @@ public final class SectionSync {
 			}
 		}
 		// Spalten ohne offene Auftraege, deren oberste Sektion durch ist: geladen
-		if (!TOP_SEEN.isEmpty()) {
+        if (!TOP_SEEN.isEmpty()) {
 			var it = TOP_SEEN.iterator();
 			while (it.hasNext()) {
 				long col = it.nextLong();
@@ -158,7 +158,8 @@ public final class SectionSync {
 					PENDING.remove(col);
 					Native.colSet(ChunkPos.getX(col), ChunkPos.getZ(col), true);
 					it.remove();
-				}
+        }
+        BlockPalette.uploadPending(32);
 			}
 		}
 	}
@@ -167,6 +168,7 @@ public final class SectionSync {
 	private static Result encode(Job j) {
 		int[] single = {-1, 0};
 		j.states.forEachInPalette(st -> {
+            BlockPalette.requireState(Block.getId(st));
 			single[1]++;
 			single[0] = Block.getId(st);
 		});

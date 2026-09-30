@@ -8,17 +8,36 @@ noch nicht mit der Pyridium-Ausgabe verbunden.** Das Produktionsziel bleibt
 ## Blocktexturen
 
 Pyridium benutzt die echten gebackenen Minecraft-Blocktexturen, nicht die
-Demo-Texturen. Material16 erweitert die Materialtabelle von 256 auf 4096 Plätze.
+Demo-Texturen. Material16 erweitert die Materialtabelle auf 16384 Plätze.
 Die Texturen bleiben RGBA8; die Biom-Tönung im Voxelattribut benutzt RGB565.
 Legacy-Pyrit-Kontexte behalten Material8/RGB24. Wegen der erweiterten Scene-ABI
-ist die native API-Version jetzt 0.3; alte native Aufrufer müssen neu bauen.
+ist die native API-Version jetzt 0.4; alte native Aufrufer müssen neu bauen.
 
-Im fensterlosen Integrationstest von Minecraft 26.3: **1196 Blockmaterialien,
+Im fensterlosen Bare-Bones-PBR-Test von Minecraft 26.3: **10840 Blockmaterialien,
 30154 texturierte Zustände, 0 einfarbige Ersatzmaterialien**. Das ist keine
 Behauptung vollständiger Blockmodelltreue: der Weltpfad stellt solide Zustände
-weiterhin als Voxel dar und übernimmt Ober- und Seitentexturen, nicht sämtliche
-modellabhängigen UVs, sechs individuellen Seiten, Blumen, Treppenformen oder
-Texturanimationen. Größere Resource-Pack-Texturen werden bisher auf 16×16 abgetastet.
+weiterhin als Voxel dar; Treppenformen und Texturanimationen sind nicht vollständig.
+Alle sechs Seiten werden aus den echten Modell-Quads mit deren UV-Rotation,
+Zuschnitt, Overlays und separater Biom-Tönung gebacken. Standardlimit: 128×128,
+mit `pyridium.maxTextureSize` bis 256×256. Laub benutzt die Textur-Alpha-Maske
+statt zufälliger Löcher. Mips mischen keine benachbarten Flächen.
+
+Aktive Resource-Packs liefern LabPBR-`_n`/`_s`-Karten: Normalen mit rotierten
+Tangenten, AO, Smoothness/Rauheit, dielektrisches F0, metallische Reflexion und
+Emission werden ausgewertet. Der Test fand 758 Normal- und 852 Materialkarten.
+Height/POM und Porosity/Wetness sind noch nicht implementiert; vordefinierte
+Metalle verwenden bisher Albedo-F0 statt materialspezifischer Leiter-N/K-Werte.
+Gemeinsame Texturkacheln und Materialrezepte werden dedupliziert; GPU-Uploads
+erfolgen bedarfsweise statt für jeden möglichen Blockzustand gleichzeitig.
+
+## Dynamisches LOD
+
+Der HashDAG-Planer wählt die Verfeinerung aus projizierter Voxelgröße,
+Kameraposition, FoV, Ausgabeauflösung und Speicherbudget. Leer abgetastete grobe
+Chunks verhindern keine feineren Nachfolger mehr. Sichtbare Verfeinerungsjobs
+werden nach projiziertem Fehler priorisiert statt sämtliche Fernstufen zuerst
+abzuarbeiten. Die dyadischen DAG-Stufen bleiben diskret; Fern-Worldgen-Geometrie
+ist weiterhin approximiert und wird dadurch nicht zu Vanilla-Geometrie.
 
 ## Entities
 
@@ -78,7 +97,8 @@ GPU-Terrain allein beweist das nicht.
 
 ## Tests und Leistung
 
-- `./gradlew compileClientJava` und `zig build test` in `native/pyrit`.
+- `./gradlew compileClientJava`, `bash tools/check_block_faces.sh` und
+  `zig build test` in `native/pyrit` (55 Tests einschließlich PBR und Alpha).
 - `python3 tools/check_model_voxels.py <pyridium_kernels.ptx>` prüft CUDA-UVs,
   Alpha, Tönung, Voxelkoordinaten, verzerrte Quads, Eckfarben, untexturierte
   Geometrie und 257 Flächenbereiche gegen eine unabhängige CPU-Referenz
@@ -98,6 +118,8 @@ GPU-Terrain allein beweist das nicht.
   Die PNGs bleiben dort erhalten. `targetFps=0` verhindert Auflösungsreduktion;
   Aufnahmegröße und Entity-Submissions werden im Log geprüft.
   Der Quellspielstand soll geschlossen sein, damit die Kopie konsistent ist.
+  `PYRIDIUM_TEST_PACK='/home/simon/Downloads/Bare Bones PBR.zip'` prüft zusätzlich
+  den Pack in einer temporären Kopie, ohne Spielereinstellungen zu verändern.
 - Für das gemeinsame Testbudget sind unabhängiges Prefetch und serverseitige
   GPU-Terrain-Jobs in diesen Renderer-Tests abgeschaltet. Fern-LOD bleibt CUDA.
   Solche Tests beweisen deshalb nicht die GPU-Worldgen des Serverpfads.
@@ -113,10 +135,11 @@ FPS mit 50-%-Testpausen bei 1280×720 (unterschiedliche Szenen und Mitbenutzung
 der GPU). Das ist weder ein 165-FPS-Nachweis noch ein
 Benchmark einer vollständig geladenen 1024-Chunk-Welt.
 
-Der neue native Full-HD-Qualitätslauf (RR, `targetFps=0`, Duty 1, 1920×1080,
-1024-Chunk-Sichtradius) erreichte nach dem Laden ungefähr **22–24 tatsächliche
-FPS**. Der Scheduler meldete 33.698 sichtbare LOD-Chunks, 42.436 residente
-Einträge und 0 offene Aufträge, ohne Voxelüberläufe. Das beweist die Übernahme
+Der Full-HD-PBR-Lauf (RR, `targetFps=0`, Duty 1, 1920×1080,
+1024-Chunk-Sichtradius) erreichte nach dem Laden ungefähr **17–19 tatsächliche
+FPS**. Der Scheduler meldete 34.691 sichtbare LOD-Chunks, 43.909 residente
+Einträge und 0 offene Aufträge; ein anfänglicher Voxelüberlauf wurde durch
+Kapazitätsvergrößerung aufgelöst. Das beweist die Übernahme
 der geplanten LOD-Einträge in dieser festen Kamera, nicht vollständige
 Vanilla-GPU-Worldgen oder das 165-FPS-Ziel. Die native Full-HD-Aufnahme zeigt
 Mobs, Ausrüstung, Items, Feuerball, Blocktexturen und Schatten.

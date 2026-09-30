@@ -47,6 +47,19 @@ public final class RendererTestFixture {
                 "time set midnight"
             };
             for (String command : commands) server.getCommands().performPrefixedCommand(source, command);
+            if (Boolean.getBoolean("pyridium.testMaterials")) {
+                String[] materials = {
+                    "fill 995 180 1010 995 183 1010 minecraft:oak_leaves[persistent=true]",
+                    "setblock 997 180 1010 minecraft:oak_log[axis=x]",
+                    "setblock 998 180 1010 minecraft:oak_log[axis=y]",
+                    "setblock 1000 180 1010 minecraft:oak_log[axis=z]",
+                    "setblock 1002 180 1010 minecraft:iron_block",
+                    "setblock 1003 180 1010 minecraft:gold_block",
+                    "setblock 1005 180 1010 minecraft:grass_block",
+                    "setblock 1006 180 1010 minecraft:copper_block"
+                };
+                for (String command : materials) server.getCommands().performPrefixedCommand(source, command);
+            }
             if (Boolean.getBoolean("pyridium.testEntityFeatures")) {
                 String[] features = {
                     "summon minecraft:item 999 181 1003 {NoGravity:1b,PickupDelay:32767s,Item:{id:\"minecraft:diamond\",count:1},Tags:[\"pyridium_test\"]}",

@@ -177,7 +177,7 @@ pub const Scene = extern struct {
 // dieser Voxelfarbe. Attribut 0 bedeutet beim DAG-Bau "leer".
 // ---------------------------------------------------------------------------
 
-pub const max_materials: u32 = 4096;
+pub const max_materials: u32 = 16384;
 pub const MaterialMask = [max_materials / 64]u64;
 pub const attribute_legacy: u32 = 0;
 pub const attribute_material16: u32 = 1;
@@ -223,6 +223,11 @@ pub const material_waves: u32 = 0x8;
 /// hindurch – auch Schattenstrahlen, das ergibt Lichtflecken am Boden. Das
 /// Muster hängt nur von Voxel, Fläche und Attribut ab: es rauscht nicht.
 pub const material_cutout: u32 = 0x10;
+/// Minecraft six-face atlases: texture = 6 albedo + 6 tint tiles;
+/// normal_texture = 6 LabPBR normal/AO/height tiles; side_texture = 6
+/// LabPBR smoothness/F0/SSS/emission tiles (255 emission sentinel removed).
+/// All tiles square, vertically stacked; no cross-face mip filtering.
+pub const material_face_atlas: u32 = 0x20;
 /// höchstens so viele transparente Grenzflächen je Pixel
 pub const max_transparent_layers: u32 = 4;
 
@@ -300,6 +305,10 @@ pub const TextureData = extern struct {
     levels: u32,
     reserved_tex_data: u32,
 };
+
+/// data points to width u32 texture indices, not RGBA texels. Shared tiles
+/// keep rotated/state-specific material recipes cheap without duplicating pixels.
+pub const texture_tile_table: u32 = 1;
 
 pub const max_lights: u32 = 64;
 

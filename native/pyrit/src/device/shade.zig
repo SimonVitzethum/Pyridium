@@ -78,6 +78,9 @@ pub const Surface = struct {
     subsurface_color: Vec3 = .{ 1, 1, 1 },
     /// gestörte Normale; {0,0,0} = die geometrische behalten
     normal: Vec3 = .{ 0, 0, 0 },
+    /// Dielectric F0 from LabPBR (legacy materials keep 4%).
+    f0: Vec3 = .{ 0.04, 0.04, 0.04 },
+    ao: f32 = 1,
 };
 
 pub fn surface(s: *const types.Scene, attribute: u32) Surface {
@@ -258,6 +261,7 @@ pub fn surfaceAt(s: *const types.Scene, attribute: u32, p: Vec3, n: Vec3, footpr
     var sf = surface(s, attribute);
     const mats: [*]const types.Material = @ptrFromInt(s.materials);
     const m = &mats[types.materialIndex(s.reserved_tex, attribute)];
+    if (m.flags & types.material_face_atlas != 0) return blockSurface(s, m, attribute, p, n, footprint, sf);
     if (m.variation[0] != 0 or m.variation[1] != 0 or m.variation[2] != 0)
         sf.albedo = @max(sf.albedo * columnVariation(s, m, p, n, footprint), splat(0));
     if (m.texture == 0 and m.side_texture == 0 and m.normal_texture == 0 and m.normal_strength == 0) return sf;
@@ -308,6 +312,43 @@ pub fn surfaceAt(s: *const types.Scene, attribute: u32, p: Vec3, n: Vec3, footpr
         sf.normal = vec.normalize(n - tg[0] * splat(du) - tg[1] * splat(dv));
     }
     return sf;
+}
+
+fn blockSurface(s: *const types.Scene, m: *const types.Material, attribute: u32, p: Vec3, n: Vec3, footprint: f32, initial: Surface) Surface {
+    const bt = @import("block_texture.zig");
+    var sf = initial;
+    const f = bt.face(n);
+    const scale = @max(m.texture_scale, 1e-4);
+    const uv = bt.uv(p / splat(scale), f);
+    const fp = footprint / scale;
+    const untinted = bt.rgb(bt.sample(s, m.texture, f, uv, fp));
+    const tinted = bt.rgb(bt.sample(s, m.texture, f + 6, uv, fp));
+    sf.albedo = @as(Vec3, m.base_color) * (untinted + tinted * srgbToLinear(voxelColor(s, attribute)));
+    if (m.side_texture != 0) {
+        const sp = bt.sample(s, m.side_texture, f, uv, fp);
+        // The GGX implementation squares perceptual roughness internally:
+        // alpha = (1 - LabPBR perceptual smoothness)^2.
+        sf.roughness = @max(1 - sp[0], 0.02);
+        sf.metallic = if (sp[1] * 255 >= 229.5) 1 else 0;
+        sf.f0 = splat(sp[1]);
+        sf.subsurface = if (sp[2] * 255 > 64.5) @max((sp[2] * 255 - 65) / 190, 0) else 0;
+        sf.emission += sf.albedo * splat(sp[3] * (255.0 / 254.0) * 4);
+    }
+    if (m.normal_texture != 0) {
+        const nm = bt.sample(s, m.normal_texture, f, uv, fp);
+        const nx = (nm[0] * 255 - 128) / 127;
+        const ny = -(nm[1] * 255 - 128) / 127;
+        const nz = @sqrt(@max(1 - nx * nx - ny * ny, 1e-5));
+        const tg = faceTangents(n);
+        if (@abs(nx) > 1e-5 or @abs(ny) > 1e-5)
+            sf.normal = vec.normalize(n * splat(nz) + tg[0] * splat(nx) + tg[1] * splat(ny));
+        sf.ao = nm[2];
+    }
+    return sf;
+}
+
+fn surfaceF0(sf: *const Surface) Vec3 {
+    return sf.f0 + (sf.albedo - sf.f0) * splat(sf.metallic);
 }
 
 // ---------------------------------------------------------------------------
@@ -640,7 +681,7 @@ fn brdf(n: Vec3, v: Vec3, l: Vec3, sf: *const Surface) Vec3 {
     const d = a2 / (pi * dd * dd);
     const k = a * 0.5;
     const vis = 1.0 / (4.0 * (ndl * (1 - k) + k) * (ndv * (1 - k) + k));
-    const f0 = splat(0.04) + (sf.albedo - splat(0.04)) * splat(sf.metallic);
+    const f0 = surfaceF0(sf);
     const q = 1 - vdh;
     const fw = q * q * q * q * q;
     const f = f0 + (splat(1) - f0) * splat(fw);
@@ -1033,11 +1074,11 @@ pub fn shadeHit(tracer: anytype, s: *const types.Scene, o: Vec3, d: Vec3, h: tr.
     // Indirekt: in halber Auflösung rechnet ein eigener Durchgang (gi_half),
     // sonst hier. Der diffuse Faktor kommt in beiden Fällen dazu.
     if (l.flags & types.lighting_gi_half == 0)
-        c += sf.albedo * splat(1 - sf.metallic) * indirect(tracer, s, l, ps, ns, rng, mask, trans_mask);
+        c += sf.albedo * splat((1 - sf.metallic) * sf.ao) * indirect(tracer, s, l, ps, ns, rng, mask, trans_mask);
 
     const refl_rough = if (sf.clearcoat > 0) @min(sf.roughness, sf.clearcoat_roughness) else sf.roughness;
     if (l.flags & types.lighting_reflections != 0 and refl_rough < 0.5) {
-        const f0 = splat(0.04) + (sf.albedo - splat(0.04)) * splat(sf.metallic);
+        const f0 = surfaceF0(&sf);
         const refl = reflection(tracer, s, l, ps, ns, d, refl_rough, rng, mask, trans_mask);
         const fr = fresnel(f0, @max(vec.dot(ns, v), 0)) + splat(0.04 * sf.clearcoat);
         c += fr * refl * splat(1 - 2 * refl_rough);

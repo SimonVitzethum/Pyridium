@@ -236,7 +236,8 @@ pub const Plan = struct {
         try self.collectInto(cam, &self.visible_coarse);
     }
 
-    /// Nächste Anfragen, grob vor fein, nahe vor fern; markiert sie als in Arbeit.
+    /// Highest projected voxel error first, not globally coarse before fine.
+    /// Parents still remain visible until their replacement children are ready.
     /// Hängt an `out` an (der Aufrufer mischt geänderte Chunks davor).
     pub fn takeRequests(self: *Plan, cam: [3]f64, max: usize, out: *std.ArrayList(Key)) Allocator.Error!void {
         // Liste der offenen Anfragen aufräumen: gebaute, verdrängte und gerade
@@ -253,8 +254,13 @@ pub const Plan = struct {
             plan: *const Plan,
             cam: [3]f64,
             fn less(c: @This(), a: Key, b: Key) bool {
+                const da = c.plan.distance(a, c.cam) / @as(f64, @floatFromInt(@as(u64, 1) << @intCast(a.lod)));
+                const db = c.plan.distance(b, c.cam) / @as(f64, @floatFromInt(@as(u64, 1) << @intCast(b.lod)));
+                if (da != db) return da < db;
                 if (a.lod != b.lod) return a.lod > b.lod;
-                return c.plan.distance(a, c.cam) < c.plan.distance(b, c.cam);
+                if (a.x != b.x) return a.x < b.x;
+                if (a.y != b.y) return a.y < b.y;
+                return a.z < b.z;
             }
         };
         std.mem.sort(Key, self.requests.items, Ctx{ .plan = self, .cam = cam }, Ctx.less);

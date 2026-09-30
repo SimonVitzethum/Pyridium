@@ -417,7 +417,7 @@ fn rtEquivalence(log2: u32, rt_log2: u32, rays: usize) !void {
             const t1 = @min(@reduce(.Min, @max(lo, hi)), tmax);
             if (!(t0 <= t1)) continue;
             is_calls += 1;
-            if (pyr.rt.traceSubtree(&rg, prim, o, d, 0, tmax, true, null, null, types.attribute_legacy)) |hh| {
+            if (pyr.rt.traceSubtree(&rg, prim, o, d, 0, tmax, true, null, null, types.attribute_legacy, null)) |hh| {
                 if (hh.t < tmax) {
                     tmax = hh.t;
                     best = hh;
@@ -542,6 +542,81 @@ test "Minecraft texturing: flat relief and side-specific mip footprint" {
     m.side_texture = 2;
     const wall = pyr.shade.surfaceAt(&scene, 0xFFFFFF00, p, .{ 1, 0, 0 }, 1);
     try testing.expect(wall.albedo[2] > 0.99 and wall.albedo[0] < 0.01);
+}
+
+test "Minecraft face atlases: six directions, tint, LabPBR F0/metal/emission/AO" {
+    var m = pyrit.context.Context.defaultMaterial();
+    m.flags = types.material_face_atlas | types.material_voxel_color;
+    m.texture = 1;
+    m.normal_texture = 2;
+    m.side_texture = 3;
+    // One texel per face deliberately tests the coarsest legal tile mip.
+    var colors = [_][4]u8{.{ 0, 0, 0, 255 }} ** 12;
+    for (0..6) |f| colors[f][0] = @intCast(20 + f * 20);
+    colors[9] = .{ 0, 255, 0, 255 }; // only UP has a biome-tinted contribution
+    const normals = [_][4]u8{.{ 128, 128, 128, 255 }} ** 6;
+    var specs = [_][4]u8{.{ 128, 51, 160, 0 }} ** 6;
+    specs[1] = .{ 255, 255, 0, 254 }; // metallic/emissive EAST
+    const textures = [_]types.TextureData{
+        std.mem.zeroes(types.TextureData),
+        .{ .data = @intFromPtr(&colors), .width = 1, .height = 12, .levels = 1, .reserved_tex_data = 0 },
+        .{ .data = @intFromPtr(&normals), .width = 1, .height = 6, .levels = 1, .reserved_tex_data = 0 },
+        .{ .data = @intFromPtr(&specs), .width = 1, .height = 6, .levels = 1, .reserved_tex_data = 0 },
+    };
+    var scene = std.mem.zeroes(types.Scene);
+    scene.materials = @intFromPtr(&m);
+    scene.textures = @intFromPtr(&textures);
+    scene.texture_count = textures.len;
+    const directions = [_]vec.Vec3{ .{ -1, 0, 0 }, .{ 1, 0, 0 }, .{ 0, -1, 0 }, .{ 0, 1, 0 }, .{ 0, 0, -1 }, .{ 0, 0, 1 } };
+    for (directions, 0..) |n, f| {
+        const sf = pyr.shade.surfaceAt(&scene, 0x00ff0000, .{ -1024.75, 0.25, -0.25 }, n, 100);
+        try testing.expectApproxEqAbs(@as(f32, @floatFromInt(20 + f * 20)) / 255, sf.albedo[0], 1e-5);
+        try testing.expectApproxEqAbs(@as(f32, if (f == 3) 1 else 0), sf.albedo[1], 1e-5);
+        try testing.expectApproxEqAbs(@as(f32, 128.0 / 255.0), sf.ao, 1e-5);
+        try testing.expectEqual(vec.Vec3{ 0, 0, 0 }, sf.normal);
+        if (f == 1) {
+            try testing.expectEqual(@as(f32, 1), sf.metallic);
+            try testing.expectApproxEqAbs(sf.albedo[0] * 4, sf.emission[0], 1e-5);
+        } else {
+            try testing.expectEqual(@as(f32, 0), sf.metallic);
+            try testing.expectApproxEqAbs(@as(f32, 0.2), sf.f0[0], 1e-5);
+            try testing.expectApproxEqAbs(@as(f32, 127.0 / 255.0), sf.roughness, 1e-5);
+        }
+    }
+}
+
+test "Minecraft leaf alpha: DAG and RT subtree use the identical real texel mask" {
+    var h = try common.buildSceneDag(gpa, 3);
+    defer h.deinit(gpa);
+    var m = [_]types.Material{pyrit.context.Context.defaultMaterial()} ** 256;
+    for (&m) |*mat| { mat.flags = types.material_cutout | types.material_face_atlas; mat.texture = 1; }
+    var rgba = [_][4]u8{.{ 255, 255, 255, 255 }} ** (2 * 2 * 12);
+    // Entire WEST tile transparent, all other faces opaque. No procedural
+    // hash, voxel coordinate, RGB565 tint or RT-subtree base may alter this.
+    for (rgba[0..4]) |*p| p[3] = 0;
+    const textures = [_]types.TextureData{
+        std.mem.zeroes(types.TextureData),
+        .{ .data = @intFromPtr(&rgba), .width = 2, .height = 24, .levels = 1, .reserved_tex_data = 0 },
+    };
+    var scene = std.mem.zeroes(types.Scene);
+    scene.materials = @intFromPtr(&m);
+    scene.textures = @intFromPtr(&textures);
+    scene.texture_count = textures.len;
+    var mask = [_]u64{std.math.maxInt(u64)} ** (types.max_materials / 64);
+    var g = h.device();
+    g.cut_scene = &scene;
+    const o = vec.Vec3{ -1, 2.25, 2.75 };
+    const d = vec.Vec3{ 1, 0, 0 };
+    try testing.expect(pyr.dag.trace(&g, o, d, 0, 100, true) != null);
+    try testing.expect(pyr.dag.traceSkipping(&g, o, d, 0, 100, true, null, &mask, .{ 0, 0, 0 }) == null);
+    var prims = try pyrit.rt_prims.extract(gpa, &h.dag, 3);
+    defer prims.deinit(gpa);
+    const rg = types.RtGeometry{ .nodes = @intFromPtr(h.dag.nodes.ptr), .leaves = @intFromPtr(h.dag.leaves.ptr),
+        .attributes = @intFromPtr(h.dag.attributes.?.ptr), .prims = @intFromPtr(prims.prims.ptr), .rt_log2 = prims.rt_log2,
+        .default_attribute = 1, .palette = 0 };
+    for (prims.prims) |prim| try testing.expect(pyr.rt.traceSubtree(&rg, prim, o, d, 0, 100, true, null, &mask, types.attribute_legacy, &scene) == null);
+    const reverse = pyr.dag.traceSkipping(&g, .{ 9, 2.25, 2.75 }, .{ -1, 0, 0 }, 0, 100, true, null, &mask, .{ 0, 0, 0 });
+    try testing.expect(reverse != null); // EAST is opaque
 }
 
 test "Shading: Lambert, Schatten der Sonne, Emission" {

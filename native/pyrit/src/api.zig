@@ -3,7 +3,7 @@
 const types = @import("pyrit_device").types;
 
 pub const version_major: u32 = 0;
-pub const version_minor: u32 = 3;
+pub const version_minor: u32 = 4;
 pub const version: u32 = (version_major << 16) | version_minor;
 
 pub const Result = i32;
