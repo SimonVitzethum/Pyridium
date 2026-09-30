@@ -400,7 +400,9 @@ public final class CudaCompute implements GpuCompute {
         public void close() {
             if (closed) return;
             current();
-            sync();
+            // Only the last owner unloads device code. Binding staging lives
+            // until backend shutdown, so other closes need no stream wait.
+            if (module.references == 1) sync();
             closed = true;
             module.release();
         }

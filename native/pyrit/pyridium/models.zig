@@ -43,15 +43,23 @@ export fn pyd_model_create(faces: [*]const t.ModelFace, face_count: u32, count: 
     }
     var d_faces: u64 = 0;
     var d_voxels: u64 = 0;
-    if (!root.ok(G.drv.cuMemAlloc_v2(&d_faces, face_count * @sizeOf(t.ModelFace)), "Modellflächen")) return 0;
+    var consumed = false;
+    // An early builder/launch failure must not leave a queued copy reading
+    // the Java-owned face buffer after this call returns.
+    defer if (!consumed) {
+        _ = G.drv.cuStreamSynchronize(G.stream);
+    };
+    // Context and voxelizer share G.stream. Pool-backed, ordered allocation
+    // avoids a device-wide wait that would also stall the worldgen worker.
+    if (!root.ok(G.drv.cuMemAllocAsync(&d_faces, face_count * @sizeOf(t.ModelFace), G.stream), "Modellflächen")) return 0;
     defer {
-        _ = G.drv.cuMemFree_v2(d_faces);
+        _ = G.drv.cuMemFreeAsync(d_faces, G.stream);
     }
-    if (!root.ok(G.drv.cuMemAlloc_v2(&d_voxels, @as(usize, count) * 16), "Modellvoxel")) return 0;
+    if (!root.ok(G.drv.cuMemAllocAsync(&d_voxels, @as(usize, count) * 16, G.stream), "Modellvoxel")) return 0;
     defer {
-        _ = G.drv.cuMemFree_v2(d_voxels);
+        _ = G.drv.cuMemFreeAsync(d_voxels, G.stream);
     }
-    if (!root.ok(G.drv.cuMemcpyHtoD_v2(d_faces, faces, face_count * @sizeOf(t.ModelFace)), "Modellflächen laden")) return 0;
+    if (!root.ok(G.drv.cuMemcpyHtoDAsync_v2(d_faces, faces, face_count * @sizeOf(t.ModelFace), G.stream), "Modellflächen laden")) return 0;
     var nfaces = face_count;
     var n = count;
     var size = log2_size;
@@ -64,6 +72,7 @@ export fn pyd_model_create(faces: [*]const t.ModelFace, face_count: u32, count: 
         root.setError("Modell-DAG: {s}", .{pyrit.pyr_error_message()});
         return 0;
     }
+    consumed = true; // GPU builder has synchronized the shared stream.
     return @intFromPtr(geometry);
 }
 

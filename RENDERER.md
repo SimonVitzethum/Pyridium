@@ -136,12 +136,20 @@ Kernels übersetzt, nicht mehr als ein Modul je Spezialisierung. Identische
 PTX-Module teilen auch zwischen LOD-Stufen ihren CUDA-Modulcode. Die
 Pufferbindungen bleiben pro Kernel unabhängig und werden unmittelbar vor
 dem Dispatch streamgeordnet aktiviert; unveränderte Bindungen werden nicht
-erneut übertragen. Module werden referenzgezählt genau einmal freigegeben.
+erneut übertragen. Module werden referenzgezählt genau einmal freigegeben;
+nur der letzte Besitzer wartet vor dem Entladen auf den CUDA-Stream.
 Der PTX-Cache berücksichtigt Architektur, Mathematikmodus, NVRTC-Version,
 Quelltext und alle eingebundenen Header. Renderer, Sektions- und Entity-Kernels
 werden bei der Initialisierung aufgelöst und, wenn `cuFuncLoad` verfügbar ist,
 explizit vorab geladen. Das vermeidet Lazy-Loading beim ersten Einsatz,
 garantiert aber weder volle SM-Belegung noch 165 FPS.
+
+Neue Entity-Modell-DAGs allokieren und entsorgen ihre temporären GPU-Puffer
+streamgeordnet im vorhandenen CUDA-Speicherpool. Das vermeidet geräteweite
+Allokations-/Freigabe-Wartepunkte neben dem Worldgen-Arbeiter. Upload,
+Voxelisierung und DAG-Bau verwenden denselben Bildstream; der Builder wartet
+vor der Rückgabe auf seine Ergebnisse. Auch frühe Fehler warten vor Rückgabe,
+damit der Java-Flächenpuffer nicht während einer offenen Kopie freigegeben wird.
 
 - `./gradlew compileClientJava`, `bash tools/check_block_faces.sh` und
   `zig build test` in `native/pyrit` (59 Tests einschließlich PBR, Alpha,

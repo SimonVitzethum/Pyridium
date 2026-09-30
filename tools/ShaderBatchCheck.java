@@ -46,6 +46,7 @@ public final class ShaderBatchCheck {
                         List.of(new long[]{a[0], outA[1], a[2]}, new long[]{b[0], outB[1], b[2]}));
                 verify(outA, new float[]{2, 0, 4});
                 verify(outB, new float[]{0, 3, 0});
+                gpu.runAsync(List.of(new GpuCompute.Dispatch(k0, push, 1, 1)), List.of());
                 k0.close();
                 k0.close();
                 k1.bind(table, zero, zero, zero, zero, zero, zero, a, zero, zero, zero);
@@ -54,7 +55,12 @@ public final class ShaderBatchCheck {
                 gpu.sync();
                 verify(outA, new float[]{2, 3, 4});
                 k1.close();
+                k2.bind(table, zero, zero, zero, zero, zero, zero, b, zero, zero, zero);
+                gpu.runAsync(List.of(new GpuCompute.Dispatch(k2, push, 1, 1)), List.of());
                 k2.close();
+                gpu.downloadAsync(outB[1], b[0], b[2]);
+                gpu.sync();
+                verify(outB, new float[]{0, 3, 4});
                 System.out.println("PASS: mixed shader batch, one shared module, independent bindings, rebind and repeated close");
             }
         }
