@@ -164,12 +164,14 @@ pub const Plan = struct {
     fn visitKnown(self: *Plan, k: Key, cam: [3]f64, known: ?State) Allocator.Error!void {
         if (known == null and !self.inRange(k)) return;
         const state = known orelse (try self.touch(k)).state; // Zeiger nicht halten: Tabelle wächst
-        if (state == .empty) return; // leerer Bereich: Kinder ebenfalls leer
+        // Empty describes this sampled representation, not its whole volume.
+        // Thin surfaces (and terrain below y=0 at very coarse levels) can be
+        // missed by the samples. Only lod=0 proves a region is actually empty.
         const dist = self.distance(k, cam);
         if (dist > self.cfg.view_distance) return; // hinter der Sichtweite
         // Bildschirmmaß: verfeinern, solange ein Voxel zu groß erschiene
         const refine = k.lod > 0 and dist < self.cfg.refine_k * @as(f64, @floatFromInt(@as(u64, 1) << @intCast(k.lod)));
-        if (refine and state == .ready) {
+        if (refine and (state == .ready or state == .empty)) {
             var child_state: [8]?State = .{null} ** 8;
             var all_ready = true;
             var i: u32 = 0;
@@ -292,6 +294,29 @@ pub const Plan = struct {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+test "sampled empty parent still refines to occupied children" {
+    var p = Plan{ .gpa = testing.allocator, .cfg = .{
+        .chunk_log2 = 4, .max_lod = 3, .view_distance = 64,
+        .refine_k = 100, .y_min = -16, .y_max = 16,
+    } };
+    defer p.deinit();
+    const cam = [3]f64{ 1, -1, 1 };
+    var req: std.ArrayList(Key) = .empty;
+    defer req.deinit(testing.allocator);
+    for (0..6) |_| {
+        req.clearRetainingCapacity();
+        try p.update(cam);
+        try p.takeRequests(cam, 10000, &req);
+        for (req.items) |k| p.finish(k, k.lod != 0, 0);
+    }
+    var found = false;
+    for (p.visible.items) |k| {
+        try testing.expectEqual(@as(u8, 0), k.lod);
+        if (k.x == 0 and k.y == -1 and k.z == 0) found = true;
+    }
+    try testing.expect(found);
+}
 
 const testing = std.testing;
 const print = std.debug.print;
