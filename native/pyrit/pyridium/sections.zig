@@ -221,7 +221,7 @@ pub fn reset() void {
 }
 
 /// Einmal je Frame: Tabelle hochladen, geänderte Bereiche in Pyrit ungültig machen
-pub fn flush(ctx: ?*anyopaque, world: ?*anyopaque) void {
+pub fn flush(ctx: ?*anyopaque, world: ?*anyopaque, spectator_world: ?*anyopaque) void {
     lock();
     defer unlock();
     if (S.table_dirty and S.cap != 0) {
@@ -238,6 +238,8 @@ pub fn flush(ctx: ?*anyopaque, world: ?*anyopaque) void {
         while (max_lod < 20 and @as(f64, @floatFromInt((@as(u64, 2) << @intCast(max_lod + 1)) + 2)) <= side) max_lod += 1;
         for (S.dirty.items) |d| {
             _ = pyrit.pyr_world_invalidate_lods(@ptrCast(ctx), @ptrCast(world), &.{ d[0], d[1], d[2] }, &.{ d[3], d[4], d[5] }, max_lod);
+            if (spectator_world != null)
+                _ = pyrit.pyr_world_invalidate_lods(@ptrCast(ctx), @ptrCast(spectator_world), &.{ d[0], d[1], d[2] }, &.{ d[3], d[4], d[5] }, 0);
         }
     }
     S.dirty.clearRetainingCapacity();

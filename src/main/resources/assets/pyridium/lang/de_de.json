@@ -1,0 +1,4 @@
+{
+  "pyridium.options.spectatorCache": "Spectator-DAG vorhalten",
+  "pyridium.options.spectatorCache.tooltip": "Baut geladene Innenräume/Höhlen zusätzlich im Hintergrund als HashDAG. Nutzt nur ein begrenztes Budget bei freiem VRAM. Aus: erst beim Wechsel in Spectator aufbauen."
+}

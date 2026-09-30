@@ -76,6 +76,7 @@ typedef struct PyrHit {
 #define PYR_TRACE_NO_ATTRIBUTE 0x2u  /* Attribut nicht bestimmen */
 #define PYR_TRACE_SKIP_TRANSPARENT 0x8u /* durchsichtige Voxel überspringen */
 #define PYR_TRACE_EXTENDED     0x4u  /* pyr_trace schreibt PyrHitEx (Voxel, Position, Normale), z. B. für Picking */
+#define PYR_TRACE_SPECTATOR    0x10u /* mask 4 within 96 blocks, mask 1 beyond */
 
 typedef struct PyrHitEx {
     PyrHit   hit;

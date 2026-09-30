@@ -12,6 +12,38 @@ const testing = std.testing;
 const gpa = testing.allocator;
 const print = std.debug.print;
 
+test "spectator rays replace approximate cave fillings and retain far terrain/entities" {
+    var h = try common.buildSceneDag(gpa, 3);
+    defer h.deinit(gpa);
+    var inst = [3]types.InstanceData{
+        common.makeInstance(0, 8, common.makeTransform(.{ 0, 1, 0 }, 0, 1, .{ 5, 0, 0 }), 1),
+        common.makeInstance(0, 8, common.makeTransform(.{ 0, 1, 0 }, 0, 1, .{ 20, 0, 0 }), 1),
+        common.makeInstance(0, 8, common.makeTransform(.{ 0, 1, 0 }, 0, 1, .{ 110, 0, 0 }), 1),
+    };
+    inst[0].mask = 1; // approximate terrain must not fill the near cave
+    inst[1].mask = 4; // exact loaded cave wall
+    inst[2].mask = 1; // adaptive far terrain remains visible
+    var s = common.hostScene(&h, @ptrCast(&h.geometry), &inst, &inst, 3);
+    const o = vec.Vec3{ 0, 1.5, 1.5 };
+    const d = vec.Vec3{ 1, 0, 0 };
+    const plain = pyr.traceScene(&s, o, d, 0, 200, 5, 0).?;
+    try testing.expectEqual(@as(u32, 0), plain.instance);
+    const cached = pyr.traceScene(&s, o, d, 0, 200, 5, types.trace_spectator).?;
+    try testing.expectEqual(@as(u32, 1), cached.instance);
+    inst[1].mask = 0; // known empty near interval: no approximate cave filling
+    const far = pyr.traceScene(&s, o, d, 0, 200, 5, types.trace_spectator).?;
+    try testing.expectEqual(@as(u32, 2), far.instance);
+    const nonunit = pyr.traceScene(&s, o, d * vec.splat(2), 0, 200, 5, types.trace_spectator).?;
+    try testing.expectApproxEqAbs(far.t / 2, nonunit.t, 1e-5);
+    inst[1].mask = 0xff; // entities participate in both terrain views
+    try testing.expectEqual(@as(u32, 1), pyr.traceScene(&s, o, d, 0, 200, 5, types.trace_spectator).?.instance);
+    inst[1].mask = 0;
+    inst[2].mask = 0;
+    try testing.expect(pyr.traceScene(&s, o, d, 0, 200, 5, types.trace_spectator) == null);
+    s.instance_count = 0;
+    try testing.expect(pyr.traceScene(&s, o, d, 0, 200, 5, types.trace_spectator) == null);
+}
+
 test "material16 preserves high indices, tint endpoints and transparent traversal" {
     const format = types.attribute_material16;
     const a = types.packMaterial16(1025, 0xffffff);

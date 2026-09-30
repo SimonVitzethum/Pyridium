@@ -42,9 +42,7 @@ export fn __raygen__slots() callconv(.nvptx_kernel) void {
     const k = @as([*]const u32, @ptrFromInt(rp.list))[i];
     const ray = @as([*]const types.ReplayRay, @ptrFromInt(rp.rays))[k];
     var p = [4]u32{ @bitCast(types.flt_max), types.no_hit, 0, @intFromBool(ray.flags & types.trace_skip_transparent != 0) };
-    var rf = ox.ray_flag_disable_anyhit;
-    if (ray.flags & types.trace_any_hit != 0) rf |= ox.ray_flag_terminate_on_first_hit;
-    if (prm.handle != 0) common.traceOnce(prm.handle, ray.o, ray.d, ray.tmin, @min(ray.tmax, 1e16), ray.mask & 0xFF, rf, &p);
+    if (prm.handle != 0) common.tracePolicy(prm.handle, ray.o, ray.d, ray.tmin, ray.tmax, ray.mask, ray.flags, &p);
     @as([*]types.ReplayHit, @ptrFromInt(rp.hits))[k] = .{ .t = @bitCast(p[0]), .instance = p[1], .attribute = p[2], .face = p[3] };
     @as([*]u32, @ptrFromInt(rp.state))[k] = 2;
 }

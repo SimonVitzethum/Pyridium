@@ -12,7 +12,8 @@
 		"LevelLoadTrackerMixin",
 		"LevelExtractorMixin",
 		"SpriteContentsAccessor",
-		"MinecraftMixin"
+		"MinecraftMixin",
+        "VideoSettingsScreenMixin"
 	],
 	"injectors": { "defaultRequire": 1 }
 }

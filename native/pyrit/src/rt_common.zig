@@ -28,6 +28,23 @@ pub noinline fn traceOnce(handle: u64, o: Vec3, d: Vec3, tmin: f32, tmax: f32, m
     ox.trace4(handle, o, d, tmin, tmax, mask, flags, 0, 1, 0, p);
 }
 
+/// Keep spectator priority inside one logical ray, including replay slots.
+/// A miss in a known cave must not expose approximate solid far-LOD terrain.
+pub inline fn tracePolicy(handle: u64, o: Vec3, d: Vec3, tmin: f32, tmax: f32, mask: u32, flags: u32, p: *[4]u32) void {
+    const initial = p.*;
+    var rf = ox.ray_flag_disable_anyhit;
+    if (flags & types.trace_any_hit != 0) rf |= ox.ray_flag_terminate_on_first_hit;
+    if (flags & types.trace_spectator != 0) {
+        const boundary = types.spectator_radius / @max(vec.length(d), 1e-20);
+        if (tmin < @min(tmax, boundary))
+            traceOnce(handle, o, d, tmin, @min(tmax, boundary), mask & 4, rf, p);
+        if (p[1] != types.no_hit) return;
+        p.* = initial; // intersection programs consume payload 3
+        if (@max(tmin, boundary) < tmax)
+            traceOnce(handle, o, d, @max(tmin, boundary), @min(tmax, tmax_limit), mask & 1, rf, p);
+    } else traceOnce(handle, o, d, tmin, @min(tmax, tmax_limit), mask & 0xFF, rf, p);
+}
+
 pub const RtTracer = struct {
     handle: u64,
     flags: u32,
@@ -37,9 +54,7 @@ pub const RtTracer = struct {
         // p[3] trägt hin die Absicht "durchsichtige Voxel überspringen" und
         // zurück die getroffene Fläche
         var p = [4]u32{ @bitCast(types.flt_max), types.no_hit, 0, @intFromBool((self.flags | flags) & types.trace_skip_transparent != 0) };
-        var rf = ox.ray_flag_disable_anyhit;
-        if ((self.flags | flags) & types.trace_any_hit != 0) rf |= ox.ray_flag_terminate_on_first_hit;
-        traceOnce(self.handle, o, d, tmin, @min(tmax, tmax_limit), ray_mask & 0xFF, rf, &p);
+        tracePolicy(self.handle, o, d, tmin, tmax, ray_mask, self.flags | flags, &p);
         if (p[1] == types.no_hit) return null;
         const t: f32 = @bitCast(p[0]);
         const inst = &pyr.scene.instances(s)[p[1]];
@@ -54,4 +69,3 @@ pub const RtTracer = struct {
         };
     }
 };
-

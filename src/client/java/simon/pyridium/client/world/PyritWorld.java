@@ -138,7 +138,8 @@ public final class PyritWorld {
 			MemoryUtil.memPutLong(a + 64, target.ptr);
 			MemoryUtil.memPutFloat(a + 72, 0.9f);
 			MemoryUtil.memPutFloat(a + 76, 3.0f);
-			MemoryUtil.memPutInt(a + 80, 0);
+			MemoryUtil.memPutInt(a + 80, (mc.player != null && mc.player.isSpectator() ? 1 : 0) |
+                (RendererSettings.spectatorPrebuild() ? 2 : 0));
 			if (System.currentTimeMillis() > nextLog) {
 				nextLog = System.currentTimeMillis() + 10000;
 				LOGGER.info("Pyridium: Kamera {} {} {} Blick {} {} {}", String.format("%.1f", p.x), String.format("%.1f", p.y), String.format("%.1f", p.z),

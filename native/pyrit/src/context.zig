@@ -1587,6 +1587,17 @@ pub const Context = struct {
         return sum;
     }
 
+    /// Account a caller's own geometry set without charging unrelated worlds.
+    /// Shared bytes count once per group; private bytes count per geometry.
+    pub fn geometryMemory(self: *Context, h: usize) Error!struct { group: u64, shared_bytes: u64, private_bytes: u64 } {
+        const s = try self.geometrySlot(h);
+        if (s.batch) |bi| {
+            const b = self.batches.items[bi];
+            return .{ .group = @as(u64, bi) * 2 + 1, .shared_bytes = b.node_words * 4 + b.leaf_count * 8 + b.attr_count * 4, .private_bytes = s.edit_attr_cap * 4 };
+        }
+        return .{ .group = @as(u64, decodeHandle(h).index) * 2, .shared_bytes = s.node_words * 4 + s.leaf_count * 8 + s.attribute_count * 4, .private_bytes = s.edit_attr_cap * 4 };
+    }
+
     fn batchRelease(self: *Context, bi: u32) Error!void {
         const b = &self.batches.items[bi];
         b.refs -= 1;
@@ -3203,4 +3214,32 @@ test "Handles" {
     try std.testing.expectEqual(@as(u32, 5), d.index);
     try std.testing.expectEqual(@as(u32, 7), d.generation);
     try std.testing.expect(encodeHandle(0, 0) != 0);
+}
+
+test "geometry memory groups isolate worlds without double-counting shared DAG batches" {
+    var slots = [_]GeometrySlot{
+        .{ .alive = true, .batch = 0 },
+        .{ .alive = true, .batch = 0, .edit_attr_cap = 3 },
+        .{ .alive = true, .batch = 1 },
+        .{ .alive = true, .node_words = 2, .leaf_count = 3, .attribute_count = 4 },
+    };
+    var batches = [_]ChunkBatch{
+        .{ .refs = 2, .node_words = 10, .leaf_count = 2, .attr_count = 7 },
+        .{ .refs = 1, .node_words = 100, .leaf_count = 20, .attr_count = 70 },
+    };
+    // No driver calls: only CPU bookkeeping is used by this query.
+    var ctx: Context = undefined;
+    ctx.geometries = &slots;
+    ctx.batches = .{ .items = &batches, .capacity = batches.len };
+    const a = try ctx.geometryMemory(encodeHandle(0, 1));
+    const b = try ctx.geometryMemory(encodeHandle(1, 1));
+    const other = try ctx.geometryMemory(encodeHandle(2, 1));
+    const own = try ctx.geometryMemory(encodeHandle(3, 1));
+    try std.testing.expectEqual(@as(u64, 84), a.shared_bytes);
+    try std.testing.expectEqual(a.group, b.group);
+    try std.testing.expectEqual(@as(u64, 12), b.private_bytes);
+    try std.testing.expect(other.group != a.group);
+    try std.testing.expect(own.group != a.group and own.group != other.group);
+    try std.testing.expectEqual(@as(u64, 48), own.shared_bytes);
+    try std.testing.expectError(error.InvalidHandle, ctx.geometryMemory(encodeHandle(0, 2)));
 }

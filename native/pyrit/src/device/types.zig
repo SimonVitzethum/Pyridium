@@ -465,6 +465,10 @@ pub const trace_extended: u32 = 0x4;
 /// Voxel mit material_transparent überspringen (Primärstrahlen, Schatten):
 /// die Traversierung läuft weiter bis zum nächsten undurchsichtigen Voxel
 pub const trace_skip_transparent: u32 = 0x8;
+/// Loaded-area spectator world (mask 4) replaces the approximate world within
+/// 96 blocks of this ray's origin. Mask 1 continues beyond that boundary.
+pub const trace_spectator: u32 = 0x10;
+pub const spectator_radius: f32 = 96;
 
 pub const HitEx = extern struct {
     hit: Hit,

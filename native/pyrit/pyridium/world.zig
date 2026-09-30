@@ -13,6 +13,7 @@ const root = @import("root.zig");
 const sections = @import("sections.zig");
 const t = @import("types.zig");
 const quality = @import("quality.zig");
+const spectator = @import("spectator.zig");
 const Budget = @import("test_budget").Budget;
 
 const G = &root.G;
@@ -41,6 +42,12 @@ pub const Mode = enum(u32) { native = 0, taau = 1, dlaa = 2, dlss = 3, rr = 4 };
 const W = struct {
     ctx: ?*anyopaque = null,
     world: ?*anyopaque = null,
+    spectator_world: ?*anyopaque = null,
+    spectator_budget: u64 = 0,
+    spectator_active: bool = false,
+    spectator_rendered: bool = false,
+    spectator_retry_ms: i64 = 0,
+    spectator_log_ms: i64 = 0,
     gen: scene.Generator = undefined,
     wi: api.WorldInfo = undefined,
     light: types.Lighting = undefined,
@@ -152,12 +159,17 @@ var d_known: u64 = 0;
 var d_known_len: usize = 0;
 var h_keys: std.ArrayList(pyr.types.ChunkKey) = .empty;
 var h_known: std.ArrayList(u32) = .empty;
+var generate_mutex: std.c.pthread_mutex_t = std.c.PTHREAD_MUTEX_INITIALIZER;
 
 /// Generator (Pyrits Arbeiter-Thread): erst das Rückfall-Gelände für alle
 /// Chunks, dann überschreibt der Sektions-Kern die Chunks, die ganz in
 /// geladenen Minecraft-Spalten liegen.
 fn generate(user: ?*anyopaque, params: *const types.WorldGenParams, stream: ?*anyopaque) callconv(.c) void {
-    _ = user;
+    // Both streamers use the same section tables and staging buffers. Do not
+    // duplicate worldgen or race the reusable host/device scratch storage.
+    _ = std.c.pthread_mutex_lock(&generate_mutex);
+    defer _ = std.c.pthread_mutex_unlock(&generate_mutex);
+    const cache_only = user == @as(?*anyopaque, @ptrCast(&S.spectator_world));
     const n = params.count;
     if (n == 0) return;
     const st: cuda.CUstream = @ptrCast(stream);
@@ -172,9 +184,9 @@ fn generate(user: ?*anyopaque, params: *const types.WorldGenParams, stream: ?*an
     var tab = sections.known(h_keys.items, h_known.items);
     // Fernbereich: exakter Vanilla-Generator (Java, GPU); sonst Rückfall-Gelände
     var handled = false;
-    if (lod_cb) |cb| {
+    if (!cache_only) if (lod_cb) |cb| {
         handled = cb(@intFromPtr(h_keys.items.ptr), @intCast(n), params.voxels, params.counts, @intCast(params.capacity), @intFromPtr(h_known.items.ptr)) == 1;
-    }
+    };
     // Never substitute a different demo world for missing Minecraft data.
     // Counts were cleared by Pyrit; loaded sections below remain renderable.
     if (!handled) _ = G.drv.cuMemsetD8Async(params.counts, 0, @as(usize, n) * 4, st);
@@ -196,6 +208,103 @@ fn generate(user: ?*anyopaque, params: *const types.WorldGenParams, stream: ?*an
     var g = params.*;
     var args = [_]?*anyopaque{ @ptrCast(&g), @ptrCast(&tab) };
     _ = G.drv.cuLaunchKernel(gen_sec, n, 1, 1, 256, 1, 1, 0, st, &args, null);
+    // d_known is shared by both workers. It cannot be overwritten while the
+    // previous worker's kernel still reads it, even on low-priority streams.
+    _ = G.drv.cuStreamSynchronize(st);
+}
+
+fn terrainBudget(bytes: u64) void {
+    const config = api.WorldConfig{ .voxel_pixels = S.wi.voxel_pixels, .view_distance = S.wi.view_distance, .memory_budget = bytes };
+    _ = pyrit.pyr_world_configure(@ptrCast(S.ctx), @ptrCast(S.world), &config);
+}
+
+fn releaseSpectator() void {
+    if (S.spectator_world) |w| {
+        _ = pyrit.pyr_world_destroy(@ptrCast(S.ctx), @ptrCast(w));
+        S.spectator_world = null;
+        S.spectator_budget = 0;
+        S.spectator_rendered = false;
+        S.frame = 0;
+        terrainBudget(S.wi.memory_budget);
+        std.debug.print("[pyridium] Spectator-DAG freigegeben\n", .{});
+    }
+}
+
+fn updateSpectator(c: *const CamIn, o: *const [3]f64, cam: *const types.Camera) void {
+    const wanted = c.flags & 3 != 0;
+    const active = c.flags & 1 != 0;
+    if (active != S.spectator_active) {
+        S.spectator_active = active;
+        S.frame = 0; // reset reconstruction after changing terrain masks
+    }
+    S.tg.ray_mask = 1;
+    S.tg.flags = 0;
+    S.tg.secondary_mask = 0;
+    if (!wanted and S.spectator_world == null) return;
+    var free_b: usize = 0;
+    var total_b: usize = 0;
+    if (G.drv.cuMemGetInfo_v2(&free_b, &total_b) != 0) return;
+    if (S.spectator_world != null and spectator.Policy.release(free_b, wanted)) {
+        releaseSpectator();
+        S.spectator_retry_ms = nowMs() + 5000;
+    }
+    if (wanted and S.spectator_world == null and nowMs() >= S.spectator_retry_ms) {
+        S.spectator_retry_ms = nowMs() + 5000;
+        const bytes = spectator.Policy.budget(free_b, S.wi.memory_budget);
+        if (bytes != 0) {
+            var wi = S.wi;
+            wi.user = @ptrCast(&S.spectator_world);
+            wi.max_lod = 1; // exactly LOD0; the usual adaptive far world stays separate
+            wi.view_chunks = 4;
+            wi.view_distance = 128;
+            wi.memory_budget = bytes;
+            wi.mask = spectator.ray_mask;
+            wi.secondary_mask = 0;
+            wi.chunks_per_update = 32;
+            wi.chunk_capacity = 32768;
+            wi.keep_frames = 120;
+            if (pyrit.pyr_world_create(@ptrCast(S.ctx), &wi, @ptrCast(&S.spectator_world)) == api.ok) {
+                S.spectator_budget = bytes;
+                terrainBudget(S.wi.memory_budget - bytes);
+                std.debug.print("[pyridium] Spectator-DAG angelegt: {d} MiB Budget, 128 Bloecke Radius, nur geladene Sektionen\n", .{bytes >> 20});
+            }
+        }
+    }
+    if (S.spectator_world) |w| {
+        if (pyrit.pyr_world_update(@ptrCast(S.ctx), @ptrCast(w), &c.pos, o, cam) != api.ok) {
+            releaseSpectator(); // optional cache must never disable the terrain renderer
+            S.spectator_retry_ms = nowMs() + 5000;
+            return;
+        }
+        var stats: api.WorldStats = undefined;
+        _ = pyrit.pyr_world_stats(@ptrCast(w), &stats);
+        // LOD0 cannot coarsen in response to pressure. Its optional cache
+        // therefore needs a hard release policy in addition to WorldConfig.
+        if (stats.bytes > S.spectator_budget) {
+            std.debug.print("[pyridium] Spectator-DAG: Budget erreicht, Vorbau pausiert\n", .{});
+            releaseSpectator();
+            S.spectator_retry_ms = nowMs() + 60000;
+            return;
+        }
+        // Never replace the near scene with an unbuilt cache. Once ready,
+        // near rays must not hit the approximate far world's cave fillings.
+        if (active and stats.pending_chunks == 0 and stats.resident_chunks != 0) {
+            S.tg.ray_mask = 1 | spectator.ray_mask;
+            S.tg.flags = types.trace_spectator;
+            // Approximate near terrain must not cast fictitious cave shadows
+            // or black out GI. Loaded cave walls also serve secondary rays.
+            S.tg.secondary_mask = spectator.ray_mask;
+        }
+        const rendered = S.tg.flags & types.trace_spectator != 0;
+        if (rendered != S.spectator_rendered) {
+            S.spectator_rendered = rendered;
+            S.frame = 0;
+        }
+        if (nowMs() >= S.spectator_log_ms) {
+            S.spectator_log_ms = nowMs() + 10000;
+            std.debug.print("[pyridium] Spectator-DAG: aktiv {any}, gerendert {any}, sichtbar {d}, resident {d}, offen {d}, {d} MiB\n", .{ active, rendered, stats.visible_chunks, stats.resident_chunks, stats.pending_chunks, stats.bytes >> 20 });
+        }
+    }
 }
 
 /// Pyrit-Kontext und Welt anlegen. seed: Weltsamen (Demo-Generator vorerst)
@@ -314,7 +423,7 @@ export fn pyd_world_configure(px: f32, view_chunks: u32, target_fps: f32) i32 {
     const config = api.WorldConfig{
         .voxel_pixels = px,
         .view_distance = @floatFromInt(view_chunks * 16),
-        .memory_budget = S.wi.memory_budget,
+        .memory_budget = S.wi.memory_budget - S.spectator_budget,
     };
     if (!req(pyrit.pyr_world_configure(@ptrCast(S.ctx), @ptrCast(S.world), &config), "Weltkonfiguration")) return -1;
     S.wi.voxel_pixels = px;
@@ -389,8 +498,9 @@ export fn pyd_world_frame(c: *const CamIn) i32 {
     // Der Render-Thread wartet nie auf die Welt: sie füllt sich fortlaufend
     // (grob zuerst, der Planer verfeinert), der Frame bleibt flüssig.
     S.loaded = true;
-    sections.flush(S.ctx, S.world);
+    sections.flush(S.ctx, S.world, S.spectator_world);
     if (!req(pyrit.pyr_world_update(@ptrCast(S.ctx), @ptrCast(S.world), &c.pos, &o, &out_cam), "Update")) return -1;
+    updateSpectator(c, &o, &out_cam);
     const fi = api.FrameInfo{ .time = c.time, .origin = o };
     if (!req(pyrit.pyr_commit(@ptrCast(S.ctx), &fi), "Commit")) return -1;
     _ = G.drv.cuEventRecord(S.timings[slot][0], G.stream);
@@ -424,6 +534,7 @@ export fn pyd_world_destroy() void {
         if (ev != null) _ = G.drv.cuEventDestroy_v2(ev);
     };
     _ = pyrit.pyr_world_destroy(@ptrCast(S.ctx), @ptrCast(S.world));
+    if (S.spectator_world) |w| _ = pyrit.pyr_world_destroy(@ptrCast(S.ctx), @ptrCast(w));
     freeTargets();
     S.gen.deinit();
     pyrit.pyr_destroy(@ptrCast(S.ctx));

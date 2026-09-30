@@ -185,6 +185,8 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(fixup_test).step);
     const quality_test = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("pyridium/quality.zig"), .target = b.graph.host }) });
     test_step.dependOn(&b.addRunArtifact(quality_test).step);
+    const spectator_test = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("pyridium/spectator.zig"), .target = b.graph.host }) });
+    test_step.dependOn(&b.addRunArtifact(spectator_test).step);
 
     // Render-Werkzeug: zig build render -- [--vox datei.vox] [--out bild.ppm] ...
     // Der Weltmodus rendert die Welt der Demo.

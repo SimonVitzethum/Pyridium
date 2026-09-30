@@ -37,6 +37,9 @@ public class MinecraftMixin {
 		if (after == null || mc.level == null || mc.player == null) {
 			return;
 		}
+        // Texture baking/world startup is not part of the scene-evaluation
+        // interval. Allow a full capture sequence after the first world frame.
+        if (!PyritWorld.isReady()) return;
 		if (pyridium$joined == 0L) {
 			pyridium$joined = System.currentTimeMillis();
 		}

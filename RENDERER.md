@@ -38,6 +38,40 @@ Chunks verhindern keine feineren Nachfolger mehr. Sichtbare Verfeinerungsjobs
 werden nach projiziertem Fehler priorisiert statt sämtliche Fernstufen zuerst
 abzuarbeiten. Die dyadischen DAG-Stufen bleiben diskret; Fern-Worldgen-Geometrie
 ist weiterhin approximiert und wird dadurch nicht zu Vanilla-Geometrie.
+Auch leere fertige Batches stoßen Auswahl/Verfeinerung erneut an. Ersetzte
+Chunks werden wieder sichtbar geschaltet; leer gewordene Ersatz-Chunks geben
+ihre vorherigen Instanzen frei.
+
+## Spectator
+
+Grafikeinstellungen → Pyridium · CUDA → **Spectator-DAG vorhalten** (Standard:
+aus). Die Einstellung wird atomar in `config/pyridium-renderer.properties`
+gespeichert. Ein zusätzlicher Pyrit-World-Streamer baut geladene Minecraft-
+Sektionen einschließlich Höhlenflächen in LOD0 innerhalb von 128 Blöcken.
+Es gibt keinen separaten Raster-Renderer und keine zweite Materialpipeline.
+Aus: derselbe Cache entsteht erst beim Wechsel in den Spectator-Modus und
+wird beim Verlassen wieder freigegeben. An: er bleibt auch außerhalb des
+Spectator-Modus vorgebaut und folgt der Kamera, solange Speicher verfügbar ist.
+
+Budget: ein Achtel der bestehenden Welt-DAG-Quote, höchstens 128 MiB für
+Knoten/Blätter/Attribute. Start nur ab 768 MiB freiem VRAM; unter 384 MiB
+oder bei Überschreiten der DAG-Quote wird der optionale Cache freigegeben.
+Generator-/BVH-Scratch benötigt zusätzlich Speicher. Die VRAM-Hysterese und
+Wiederanlaufpause verhindern dauerhaftes Anlegen/Freigeben am Grenzwert.
+Geteilte Batch-Speicherbereiche werden pro Welt genau einmal gezählt.
+
+Sobald der Cache fertig ist, sehen Primärstrahlen innerhalb von 96 Blöcken
+die geladenen Daten, danach weiterhin das adaptive Fern-LOD. Ein leerer
+Höhlenstrahl fällt nicht auf approximierte Nahgeometrie zurück. Sekundärstrahlen
+benutzen dort den geladenen Cache, damit keine fiktiven Höhlenschatten entstehen.
+Entities nehmen an beiden Ansichten teil. Der Full-HD-PBR-Test hat Vorbau,
+Einstellungsbildschirm, Moduswechsel und einen geschlossenen unterirdischen
+Hohlraum überprüft; die Szene benötigte etwa 5–6 MiB zusätzliche DAG-Daten.
+
+Grenzen: nur tatsächlich geladene Sektionen, keine zusätzlichen Vanilla-
+Höhlen aus der approximierten Fern-Worldgen. Vollständige Vanilla-Noclip-Parität
+mit der Kamera **im Inneren eines massiven Blocks** ist noch nicht nachgewiesen.
+Während Neuaufbau/Teleports kann kurzzeitig die reguläre Weltansicht erscheinen.
 
 ## Entities
 
@@ -98,7 +132,8 @@ GPU-Terrain allein beweist das nicht.
 ## Tests und Leistung
 
 - `./gradlew compileClientJava`, `bash tools/check_block_faces.sh` und
-  `zig build test` in `native/pyrit` (55 Tests einschließlich PBR und Alpha).
+  `zig build test` in `native/pyrit` (58 Tests einschließlich PBR, Alpha,
+  Spectator-Strahlen, Speichergruppen und VRAM-Policy).
 - `python3 tools/check_model_voxels.py <pyridium_kernels.ptx>` prüft CUDA-UVs,
   Alpha, Tönung, Voxelkoordinaten, verzerrte Quads, Eckfarben, untexturierte
   Geometrie und 257 Flächenbereiche gegen eine unabhängige CPU-Referenz
@@ -120,6 +155,11 @@ GPU-Terrain allein beweist das nicht.
   Der Quellspielstand soll geschlossen sein, damit die Kopie konsistent ist.
   `PYRIDIUM_TEST_PACK='/home/simon/Downloads/Bare Bones PBR.zip'` prüft zusätzlich
   den Pack in einer temporären Kopie, ohne Spielereinstellungen zu verändern.
+  `PYRIDIUM_TEST_SPECTATOR=1` prüft zusätzlich Vorbau und Spectator-Höhlenkamera;
+  `PYRIDIUM_TEST_SPECTATOR_PREBUILD=0` prüft stattdessen Aufbau erst bei Bedarf.
+  Beide Varianten verlassen anschließend Spectator und deaktivieren den
+  Test-Vorbauschalter, um die Freigabe zu prüfen. Der Aufnahmezeitraum beginnt
+  erst mit dem ersten Weltframe, nicht während der Materialvorbereitung.
 - Für das gemeinsame Testbudget sind unabhängiges Prefetch und serverseitige
   GPU-Terrain-Jobs in diesen Renderer-Tests abgeschaltet. Fern-LOD bleibt CUDA.
   Solche Tests beweisen deshalb nicht die GPU-Worldgen des Serverpfads.

@@ -72,6 +72,20 @@ inline fn rayAabb(o: Vec3, inv: Vec3, bmin: [3]f32, bmax: [3]f32) ?[2]f32 {
 /// [tmin, tmax). Nur Instanzen mit (mask & ray_mask) != 0 werden getroffen.
 /// Derzeit linear über alle Instanzen mit AABB-Test; die Instanz-BVH folgt.
 pub fn traceScene(s: *const types.Scene, o: Vec3, d: Vec3, tmin: f32, tmax: f32, ray_mask: u32, flags: u32) ?TraceHit {
+    if (flags & types.trace_spectator != 0) {
+        const boundary = types.spectator_radius / @max(vec.length(d), 1e-20);
+        const plain = flags & ~types.trace_spectator;
+        if (tmin < @min(tmax, boundary)) {
+            if (traceSceneMasked(s, o, d, tmin, @min(tmax, boundary), ray_mask & 4, plain)) |hit| return hit;
+        }
+        return if (@max(tmin, boundary) < tmax)
+            traceSceneMasked(s, o, d, @max(tmin, boundary), tmax, ray_mask & 1, plain)
+        else null;
+    }
+    return traceSceneMasked(s, o, d, tmin, tmax, ray_mask, flags);
+}
+
+fn traceSceneMasked(s: *const types.Scene, o: Vec3, d: Vec3, tmin: f32, tmax: f32, ray_mask: u32, flags: u32) ?TraceHit {
     const inst = instances(s);
     const geo = geometries(s);
     const inv = Vec3{ safeRcp(d[0]), safeRcp(d[1]), safeRcp(d[2]) };

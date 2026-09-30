@@ -7,15 +7,56 @@ public final class RendererTestFixture {
     private static boolean installed;
     private static long installedAt;
     private static int lifecycleStage;
+    private static int spectatorStage;
+    private static int settingsStage;
     private RendererTestFixture() {}
-    public static void reset() { installed = false; installedAt = 0; lifecycleStage = 0; }
+    public static void reset() { installed = false; installedAt = 0; lifecycleStage = 0; spectatorStage = 0; settingsStage = 0; }
 
     public static void tick(Minecraft mc) {
         if (!Boolean.getBoolean("pyridium.headless") || !Boolean.getBoolean("pyridium.testEntities") ||
             mc.level == null || mc.player == null || mc.getSingleplayerServer() == null || !PyritWorld.isReady()) return;
         if (installed) {
+            long elapsed = System.currentTimeMillis() - installedAt;
+            if (Boolean.getBoolean("pyridium.testVideoSettings")) {
+                if (settingsStage == 0 && elapsed >= 12000) {
+                    settingsStage = 1;
+                    mc.gui.setScreen(new net.minecraft.client.gui.screens.options.VideoSettingsScreen(null, mc, mc.options));
+                } else if (settingsStage == 1) {
+                    settingsStage = 2;
+                    mc.gui.setScreen(null);
+                    org.slf4j.LoggerFactory.getLogger("RendererTestFixture").info("Pyridium: Grafikeinstellungen fensterlos geoeffnet und geschlossen");
+                }
+            }
+            if (Boolean.getBoolean("pyridium.testSpectator")) {
+                var server = mc.getSingleplayerServer();
+                if (spectatorStage == 0 && elapsed >= 25000) {
+                    spectatorStage = 1;
+                    server.execute(() -> server.getCommands().performPrefixedCommand(server.createCommandSourceStack(), "gamemode spectator @a"));
+                } else if (spectatorStage == 1 && elapsed >= 45000) {
+                    spectatorStage = 2;
+                    server.execute(() -> {
+                        var source = server.createCommandSourceStack();
+                        String[] cavity = {
+                            "fill 992 64 992 1008 83 1015 minecraft:stone",
+                            "fill 994 66 994 1006 81 1013 minecraft:air",
+                            "fill 994 81 994 1006 81 1013 minecraft:glowstone",
+                            "setblock 1000 67 1006 minecraft:gold_block",
+                            "execute as @a run tp @s 1000.5 69 998.5 0 10"
+                        };
+                        for (String command : cavity) server.getCommands().performPrefixedCommand(source, command);
+                        org.slf4j.LoggerFactory.getLogger("RendererTestFixture").info("Pyridium: Spectator-Testkamera im geschlossenen unterirdischen Hohlraum");
+                    });
+                } else if (spectatorStage == 2 && elapsed >= 70000) {
+                    spectatorStage = 3;
+                    System.clearProperty("pyridium.spectatorCache"); // only a disposable test override
+                    server.execute(() -> {
+                        var source = server.createCommandSourceStack();
+                        server.getCommands().performPrefixedCommand(source, "execute as @a run tp @s 1000 182 1000 0 10");
+                        server.getCommands().performPrefixedCommand(source, "gamemode creative @a");
+                    });
+                }
+            }
             if (Boolean.getBoolean("pyridium.testEntityLifecycle")) {
-                long elapsed = System.currentTimeMillis() - installedAt;
                 var server = mc.getSingleplayerServer();
                 if (lifecycleStage == 0 && elapsed >= 20000) {
                     lifecycleStage = 1;

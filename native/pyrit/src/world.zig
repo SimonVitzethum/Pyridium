@@ -110,6 +110,7 @@ pub const World = struct {
 
     chunks: std.ArrayList(Chunk) = .empty,
     chunk_free: std.ArrayList(u32) = .empty,
+    memory_groups: std.AutoHashMapUnmanaged(u64, void) = .empty,
     requests: std.ArrayList(Key) = .empty,
     evicted: std.ArrayList(world_plan.Node) = .empty,
     origin: [3]f64 = .{ 0, 0, 0 },
@@ -192,8 +193,6 @@ pub const World = struct {
     job_pre_ms: f64 = 0,
     job_build_ms: f64 = 0,
     job_runs: u64 = 0,
-    /// in diesem Frame neu fertig gewordene Chunks (ohne Ersetzungen)
-    built_new: u32 = 0,
     /// Zeitmessung der Update-Phasen (PYRIT_WORLD_PROFILE=1)
     prof: ?*[6]f64 = null,
     prof_frames: u64 = 0,
@@ -323,6 +322,7 @@ pub const World = struct {
         self.plan.deinit();
         self.chunks.deinit(self.ctx.gpa);
         self.chunk_free.deinit(self.ctx.gpa);
+        self.memory_groups.deinit(self.ctx.gpa);
         self.requests.deinit(self.ctx.gpa);
         self.evicted.deinit(self.ctx.gpa);
         self.edits.deinit(self.ctx.gpa);
@@ -716,7 +716,6 @@ pub const World = struct {
         self.lap(1, &t0); // Planer
         self.stats.built_chunks = 0;
         self.stats.built_voxels = 0;
-        self.built_new = 0;
 
         if (self.pollJob()) try self.finishJob();
         try self.runPathEdits();
@@ -740,11 +739,12 @@ pub const World = struct {
             }
         }
         self.lap(3, &t0); // Auftrag stellen
-        // Ein ersetzter Chunk (Änderung) verändert die Auswahl nicht – nur
-        // neu fertig gewordene tun das.
-        if (self.built_new > 0) try oom(self.plan.collect(self.plan_cam));
+        // Empty completions also unlock refinement and retire requests.
+        // Replacements need their newly-created instance made visible; a
+        // ready-to-empty replacement can also change the selected cover.
+        if (self.stats.built_chunks > 0) try oom(self.plan.collect(self.plan_cam));
         // Auswahl und Sichtbarkeit ändern sich nur mit dem Plan oder neuen Chunks
-        if (planned or self.built_new > 0) {
+        if (planned or self.stats.built_chunks > 0) {
             // gröbere Auswahl für Schatten und GI (Vorfahren, schon im Speicher)
             if (self.secondary_mask != 0) try oom(self.plan.collectCoarse(self.plan_cam, self.secondary_factor));
             try self.applyVisibility();
@@ -1123,7 +1123,11 @@ pub const World = struct {
         const sums = self.pinnedCounts() + self.batch_max;
         for (self.requests.items, 0..) |key, c| {
             if (handles[c] == 0) {
+                if (self.plan.nodes.get(key)) |nd| {
+                    if (nd.user != 0) try self.retireChunk(@intCast(nd.user - 1));
+                }
                 self.plan.finish(key, true, 0);
+                self.stats.built_chunks += 1;
                 continue;
             }
             const inst = ctx.instanceCreate(handles[c]) catch |e| {
@@ -1139,18 +1143,9 @@ pub const World = struct {
             try ctx.instanceKeepHistory(inst);
             // Neubau nach einer Änderung: den alten Chunk erst jetzt freigeben,
             // damit nie ein Loch entsteht.
-            var replaced = false;
             if (self.plan.nodes.get(key)) |nd| {
                 if (nd.user != 0) {
-                    replaced = true;
-                    const old: u32 = @intCast(nd.user - 1);
-                    const oc = &self.chunks.items[old];
-                    if (oc.instance != 0) {
-                        try ctx.instanceDestroy(oc.instance);
-                        try ctx.geometryDestroy(oc.geometry);
-                    }
-                    oc.* = .{ .key = oc.key, .geometry = 0, .instance = 0, .mask = 0, .stamp = 0, .stamp_coarse = 0, .voxels = 0 };
-                    try oom(self.chunk_free.append(ctx.gpa, old));
+                    try self.retireChunk(@intCast(nd.user - 1));
                 }
             }
             const idx: u32 = self.chunk_free.pop() orelse blk: {
@@ -1160,7 +1155,6 @@ pub const World = struct {
             self.chunks.items[idx] = .{ .key = key, .geometry = handles[c], .instance = inst, .mask = 0, .stamp = 0, .stamp_coarse = 0, .voxels = sums[c + 1] - sums[c] };
             self.plan.finish(key, false, @as(u64, idx) + 1);
             self.stats.built_chunks += 1;
-            if (!replaced) self.built_new += 1;
         }
     }
 
@@ -1184,9 +1178,15 @@ pub const World = struct {
         }
         var visible: u32 = 0;
         var resident: u32 = 0;
+        var bytes: u64 = 0;
+        self.memory_groups.clearRetainingCapacity();
         for (self.chunks.items) |*c| {
             if (c.instance == 0) continue;
             resident += 1;
+            const memory = try ctx.geometryMemory(c.geometry);
+            const group = try oom(self.memory_groups.getOrPut(ctx.gpa, memory.group));
+            if (!group.found_existing) bytes += memory.shared_bytes;
+            bytes += memory.private_bytes;
             var mask: u32 = 0;
             if (c.stamp == frame) {
                 mask |= self.mask;
@@ -1203,22 +1203,29 @@ pub const World = struct {
         var pending: u32 = 0;
         var it = self.plan.nodes.valueIterator();
         while (it.next()) |n| {
-            if (n.state == .requested or n.state == .building) pending += 1;
+            // Cached requests from a previous camera are not outstanding work
+            // for this view; takeRequests discards those stale queue entries.
+            if (n.last_used == frame and (n.state == .requested or n.state == .building)) pending += 1;
         }
         self.stats.pending_chunks = pending;
-        self.stats.bytes = self.ctx.batchBytes();
+        self.stats.bytes = bytes;
+    }
+
+    fn retireChunk(self: *World, index: u32) Error!void {
+        const c = &self.chunks.items[index];
+        if (c.instance != 0) {
+            try self.ctx.instanceDestroy(c.instance);
+            try self.ctx.geometryDestroy(c.geometry);
+        }
+        c.* = .{ .key = c.key, .geometry = 0, .instance = 0, .mask = 0, .stamp = 0, .stamp_coarse = 0, .voxels = 0 };
+        try oom(self.chunk_free.append(self.ctx.gpa, index));
     }
 
     fn evict(self: *World) Error!void {
         try oom(self.plan.evict(&self.evicted));
         for (self.evicted.items) |n| {
             if (n.user == 0) continue;
-            const idx: u32 = @intCast(n.user - 1);
-            const c = &self.chunks.items[idx];
-            try self.ctx.instanceDestroy(c.instance);
-            try self.ctx.geometryDestroy(c.geometry);
-            c.* = .{ .key = c.key, .geometry = 0, .instance = 0, .mask = 0, .stamp = 0, .stamp_coarse = 0, .voxels = 0 };
-            try oom(self.chunk_free.append(self.ctx.gpa, idx));
+            try self.retireChunk(@intCast(n.user - 1));
         }
     }
 };

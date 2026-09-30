@@ -1,0 +1,4 @@
+{
+  "pyridium.options.spectatorCache": "Keep spectator DAG ready",
+  "pyridium.options.spectatorCache.tooltip": "Builds loaded interiors/caves as an additional background HashDAG, with a bounded budget when VRAM is available. Off: build on demand in spectator mode."
+}
