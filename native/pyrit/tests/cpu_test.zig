@@ -12,6 +12,36 @@ const testing = std.testing;
 const gpa = testing.allocator;
 const print = std.debug.print;
 
+test "material16 preserves high indices, tint endpoints and transparent traversal" {
+    const format = types.attribute_material16;
+    const a = types.packMaterial16(1025, 0xffffff);
+    try testing.expectEqual(@as(u32, 1025), types.materialIndex(format, a));
+    try testing.expectEqual(@as(u32, 0xffffff), types.tintRgb(format, a));
+    try testing.expectEqual(@as(u32, 0), types.tintRgb(format, types.packMaterial16(4094, 0)));
+    try testing.expectEqual(@as(u32, 0xff0000), types.tintRgb(format, types.packMaterial16(4094, 0xff0000)));
+    try testing.expectEqual(@as(u32, 0), types.materialIndex(format, 0xffffffff));
+    try testing.expectEqual(@as(u32, 17), types.materialIndex(types.attribute_legacy, 0xabcdef11));
+    try testing.expectEqual(@as(u32, 0xabcdef), types.tintRgb(types.attribute_legacy, 0xabcdef11));
+    const points = [_]pyrit.dag_builder.Point{
+        .{ .x = 1, .y = 1, .z = 1, .attribute = a },
+        .{ .x = 3, .y = 1, .z = 1, .attribute = types.packMaterial16(1, 0xffffff) },
+    };
+    var built = try pyrit.dag_builder.buildPoints(gpa, 3, &points, true);
+    defer built.deinit(gpa);
+    const dag = pyr.dag.Dag{ .nodes = built.nodes.ptr, .leaves = built.leaves.ptr, .attributes = built.attributes.?.ptr, .root = built.root, .log2_size = 3, .default_attribute = 1, .attribute_format = format };
+    var skip = std.mem.zeroes(types.MaterialMask);
+    skip[1025 / 64] = @as(u64, 1) << (1025 % 64);
+    const hit = pyr.dag.traceSkipping(&dag, .{ -1, 1.5, 1.5 }, .{ 1, 0, 0 }, 0, 100, true, &skip, null, .{ 0, 0, 0 }) orelse return error.MissingHit;
+    try testing.expectEqual(types.packMaterial16(1, 0xffffff), hit.attribute);
+    try testing.expectEqual(@as(f32, 4), hit.t);
+    try testing.expect(types.maskAny(&skip));
+    var scene = std.mem.zeroes(types.Scene);
+    scene.transparent_materials = skip;
+    scene.cutout_materials = skip;
+    try testing.expect(pyr.shade.anyTransparent(&scene, 0));
+    try testing.expect(pyr.scene.anyCutout(&scene));
+}
+
 test "einzelnes Voxel, achsenparallele Strahlen" {
     const pts = [_]pyrit.dag_builder.Point{.{ .x = 5, .y = 6, .z = 7, .attribute = 42 }};
     var dag = try pyrit.dag_builder.buildPoints(gpa, 3, &pts, true);
@@ -374,7 +404,7 @@ fn rtEquivalence(log2: u32, rt_log2: u32, rays: usize) !void {
             const t1 = @min(@reduce(.Min, @max(lo, hi)), tmax);
             if (!(t0 <= t1)) continue;
             is_calls += 1;
-            if (pyr.rt.traceSubtree(&rg, prim, o, d, 0, tmax, true, null, null)) |hh| {
+            if (pyr.rt.traceSubtree(&rg, prim, o, d, 0, tmax, true, null, null, types.attribute_legacy)) |hh| {
                 if (hh.t < tmax) {
                     tmax = hh.t;
                     best = hh;

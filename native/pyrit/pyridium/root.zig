@@ -16,6 +16,7 @@ const wl = @import("wayland.zig");
 pub const world = @import("world.zig");
 pub const sections = @import("sections.zig");
 pub const materials = @import("materials.zig");
+pub const models = @import("models.zig");
 
 const ptx: [:0]const u8 = @embedFile("pyridium_ptx");
 
@@ -23,6 +24,7 @@ comptime {
     _ = world;
     _ = sections;
     _ = materials;
+    _ = models;
 }
 
 // ---------------------------------------------------------------------------

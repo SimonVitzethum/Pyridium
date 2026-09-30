@@ -54,10 +54,10 @@ export fn __intersection__dag() callconv(.nvptx_kernel) void {
     const prim = @as([*]const types.RtPrim, @ptrFromInt(g.prims))[ox.primitiveIndex()];
     const want_attribute = params().flags & types.trace_no_attribute == 0;
     const s: *const types.Scene = @ptrFromInt(params().scene);
-    const skip: ?*const [4]u64 = if (ox.getPayload(3) != 0) &s.transparent_materials else null;
+    const skip: ?*const types.MaterialMask = if (ox.getPayload(3) != 0) &s.transparent_materials else null;
     const inst = &pyr.scene.instances(s)[ox.instanceId()];
-    const cut: ?*const [4]u64 = if (pyr.scene.anyCutout(s) and pyr.scene.cutoutHere(inst)) &s.cutout_materials else null;
-    const h = pyr.rt.traceSubtree(g, prim, ox.objectRayOrigin(), ox.objectRayDirection(), ox.rayTmin(), ox.rayTmax(), want_attribute, skip, cut) orelse return;
+    const cut: ?*const types.MaterialMask = if (pyr.scene.anyCutout(s) and pyr.scene.cutoutHere(inst)) &s.cutout_materials else null;
+    const h = pyr.rt.traceSubtree(g, prim, ox.objectRayOrigin(), ox.objectRayDirection(), ox.rayTmin(), ox.rayTmax(), want_attribute, skip, cut, s.reserved_tex) orelse return;
     const kind = h.face | (if (h.inside) types.hit_inside else 0);
     _ = ox.reportIntersection1(h.t, kind, h.attribute);
 }

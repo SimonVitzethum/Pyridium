@@ -5,7 +5,10 @@
 	"client": [
 		"PreferredGraphicsApiMixin",
 		"RenderSystemMixin",
-		"LevelRendererMixin",
+        "LevelRendererMixin",
+        "EntityRenderStateMixin",
+        "EntityRenderDispatcherMixin",
+        "ModelPartAccessor",
 		"LevelLoadTrackerMixin",
 		"LevelExtractorMixin",
 		"SpriteContentsAccessor",

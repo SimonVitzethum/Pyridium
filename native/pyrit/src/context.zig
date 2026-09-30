@@ -201,6 +201,7 @@ pub const Context = struct {
     post_done: cuda.CUevent = null,
     post_pending: bool = false,
     async_post: bool = false,
+    attribute_format: u32 = types.attribute_legacy,
     /// true, solange die Nachbearbeitung Kernel einreiht
     on_post: bool = false,
     aux_event: cuda.CUevent = null,
@@ -404,6 +405,7 @@ pub const Context = struct {
         try self.check(drv.cuEventCreate(&self.render_done, cuda.CU_EVENT_DISABLE_TIMING), "cuEventCreate");
         try self.check(drv.cuEventCreate(&self.post_done, cuda.CU_EVENT_DISABLE_TIMING), "cuEventCreate");
         self.async_post = info.flags & api.create_async_post != 0;
+        self.attribute_format = if (info.flags & api.create_material16 != 0) types.attribute_material16 else types.attribute_legacy;
         try self.check(drv.cuEventCreate(&self.aux_event, cuda.CU_EVENT_DISABLE_TIMING), "cuEventCreate");
         if (std.c.getenv("PYRIT_GPU_TIMING") != null) {
             const t = self.gpa.create(GpuTiming) catch return fail(error.OutOfMemory, "Host-Speicher", .{});
@@ -781,7 +783,7 @@ pub const Context = struct {
             .cutout_materials = self.materialsWith(types.material_cutout),
             .textures = self.texture_table,
             .texture_count = self.texture_high,
-            .reserved_tex = 0,
+            .reserved_tex = self.attribute_format,
         };
         try self.uploadValue(self.scene_dev, &scene);
     }
@@ -2043,12 +2045,12 @@ pub const Context = struct {
     }
 
     /// Bitmaske der Materialien mit material_transparent (für die Traversierung)
-    fn transparentMaterials(self: *const Context) [4]u64 {
+    fn transparentMaterials(self: *const Context) types.MaterialMask {
         return self.materialsWith(types.material_transparent);
     }
 
-    fn materialsWith(self: *const Context, flag: u32) [4]u64 {
-        var m = [4]u64{ 0, 0, 0, 0 };
+    fn materialsWith(self: *const Context, flag: u32) types.MaterialMask {
+        var m = [_]u64{0} ** (types.max_materials / 64);
         for (self.materials, 0..) |mat, i| {
             if (mat.flags & flag != 0) m[i >> 6] |= @as(u64, 1) << @intCast(i & 63);
         }
@@ -2505,7 +2507,7 @@ pub const Context = struct {
             const sh = (@as(u64, h) + step - 1) / step;
             try self.fxLaunch(self.fn_fx_expose_scan, &p, sw * sh);
             try self.fxLaunch(self.fn_fx_expose_apply, &p, 1);
-        self.mark("Belichtung");
+            self.mark("Belichtung");
         }
 
         if (fx.flags & api.postfx_grade != 0) {

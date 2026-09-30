@@ -56,6 +56,11 @@ pub fn attributeColor(attribute: u32) Vec3 {
     return srgbToLinear(c);
 }
 
+fn voxelColor(s: *const types.Scene, attribute: u32) Vec3 {
+    const rgb = types.tintRgb(s.reserved_tex, attribute);
+    return Vec3{ @floatFromInt(rgb >> 16), @floatFromInt((rgb >> 8) & 255), @floatFromInt(rgb & 255) } * splat(1.0 / 255.0);
+}
+
 pub fn srgbToLinear(c: Vec3) Vec3 {
     // genau genug und schnell: c^2.2
     return .{ fm.pow(@max(c[0], 1e-8), 2.2), fm.pow(@max(c[1], 1e-8), 2.2), fm.pow(@max(c[2], 1e-8), 2.2) };
@@ -77,9 +82,9 @@ pub const Surface = struct {
 
 pub fn surface(s: *const types.Scene, attribute: u32) Surface {
     const mats: [*]const types.Material = @ptrFromInt(s.materials);
-    const m = &mats[attribute & 0xFF];
+    const m = &mats[types.materialIndex(s.reserved_tex, attribute)];
     var albedo: Vec3 = m.base_color;
-    if (m.flags & types.material_voxel_color != 0) albedo *= attributeColor(attribute);
+    if (m.flags & types.material_voxel_color != 0) albedo *= srgbToLinear(voxelColor(s, attribute));
     return .{
         .albedo = albedo,
         .emission = m.emission,
@@ -252,7 +257,7 @@ fn columnVariation(s: *const types.Scene, m: *const types.Material, p: Vec3, n: 
 pub fn surfaceAt(s: *const types.Scene, attribute: u32, p: Vec3, n: Vec3, footprint: f32) Surface {
     var sf = surface(s, attribute);
     const mats: [*]const types.Material = @ptrFromInt(s.materials);
-    const m = &mats[attribute & 0xFF];
+    const m = &mats[types.materialIndex(s.reserved_tex, attribute)];
     if (m.variation[0] != 0 or m.variation[1] != 0 or m.variation[2] != 0)
         sf.albedo = @max(sf.albedo * columnVariation(s, m, p, n, footprint), splat(0));
     if (m.texture == 0 and m.side_texture == 0 and m.normal_texture == 0 and m.normal_strength == 0) return sf;
@@ -669,8 +674,7 @@ fn occluded(tracer: anytype, s: *const types.Scene, o: Vec3, d: Vec3, tmax: f32,
 /// Gibt es überhaupt durchsichtige Instanzen oder Materialien?
 pub inline fn anyTransparent(s: *const types.Scene, trans_mask: u32) bool {
     if (trans_mask != 0) return true;
-    return (s.transparent_materials[0] | s.transparent_materials[1] |
-        s.transparent_materials[2] | s.transparent_materials[3]) != 0;
+    return types.maskAny(&s.transparent_materials);
 }
 
 /// Ist dieser Treffer durchsichtig – über die Instanzmaske oder das Material?
@@ -678,7 +682,7 @@ pub inline fn hitTransparent(s: *const types.Scene, h: tr.TraceHit, trans_mask: 
     if (trans_mask != 0 and tr.instances(s)[h.instance].mask & trans_mask != 0) return true;
     if (s.materials == 0) return false;
     const mats: [*]const types.Material = @ptrFromInt(s.materials);
-    return mats[h.attribute & 0xFF].flags & types.material_transparent != 0;
+    return mats[types.materialIndex(s.reserved_tex, h.attribute)].flags & types.material_transparent != 0;
 }
 
 /// Durchlässigkeit transparenter Körper entlang eines Schattenstrahls:
@@ -740,7 +744,7 @@ fn traceThroughSteps(tracer: anytype, s: *const types.Scene, o: Vec3, d: Vec3, t
         const h = found orelse return .{ .hit = null, .att = att };
         if (!hitTransparent(s, h, trans_mask)) return .{ .hit = h, .att = att };
         const inst = &tr.instances(s)[h.instance];
-        const m = &mats[h.attribute & 0xFF];
+        const m = &mats[types.materialIndex(s.reserved_tex, h.attribute)];
         const sf = surface(s, h.attribute);
         const eps = 1e-3 * voxelSize(inst);
         att *= splat(1 - m.opacity);
@@ -792,7 +796,7 @@ fn transmissionSteps(tracer: anytype, s: *const types.Scene, o: Vec3, d: Vec3, t
         const h = tracer.trace(s, o, d, t0, tmax, ray_mask, 0) orelse break;
         if (!hitTransparent(s, h, trans_mask)) break;
         const inst = &tr.instances(s)[h.instance];
-        const m = &mats[h.attribute & 0xFF];
+        const m = &mats[types.materialIndex(s.reserved_tex, h.attribute)];
         const sf = surface(s, h.attribute);
         const eps = 1e-3 * voxelSize(inst);
         att *= splat(1 - m.opacity);
@@ -1163,7 +1167,6 @@ fn reflection(tracer: anytype, s: *const types.Scene, l: *const types.Lighting, 
 /// Transparente Ebene (Wasser, Glas) über dem Untergrund `behind`:
 /// Fresnel-Reflexion, Deckkraft der Oberfläche, Absorption auf der Strecke
 /// bis zum Untergrund (dist). Brechung wird vernachlässigt (gerader Strahl).
-
 /// Brechung nach Snell (eta = n1 / n2); null bei Totalreflexion
 fn refract(d: Vec3, n: Vec3, eta: f32) ?Vec3 {
     const cosi = -vec.dot(n, d);
@@ -1221,7 +1224,7 @@ pub noinline fn transparentLayers(tracer: anytype, s: *const types.Scene, o0: Ve
     // Austritt.
     if (known orelse tracer.trace(s, o, d, 0, t_end, ray_mask, 0)) |first| {
         if (first.face & types.hit_inside != 0 and hitTransparent(s, first, trans_mask)) {
-            const m0 = &mats[first.attribute & 0xFF];
+            const m0 = &mats[types.materialIndex(s.reserved_tex, first.attribute)];
             const sf0 = surface(s, first.attribute);
             const inst0 = &tr.instances(s)[first.instance];
             const own0 = trans_mask != 0 and inst0.mask & trans_mask != 0;
@@ -1268,7 +1271,7 @@ pub noinline fn transparentLayers(tracer: anytype, s: *const types.Scene, o0: Ve
         // Material markiert (Wasser im selben Chunk wie der Boden): das Medium
         // reicht bis zum Untergrund.
         const own_instance = trans_mask != 0 and inst.mask & trans_mask != 0;
-        const m = &mats[th.attribute & 0xFF];
+        const m = &mats[types.materialIndex(s.reserved_tex, th.attribute)];
         var sf = surface(s, th.attribute);
         var n = worldNormal(inst, th.face);
         if (m.flags & types.material_waves != 0) {

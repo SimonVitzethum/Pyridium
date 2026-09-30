@@ -11,7 +11,7 @@ import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 import simon.pyridium.client.world.PyritWorld;
 
-/** Die Welt zeichnet Pyrit; Minecrafts Terrain-, Himmel- und Entity-Pfad entfällt. */
+/** Pyrit zeichnet Welt und Modell-Entities; Vanillas Grafik-Draws entfallen. */
 @Mixin(LevelRenderer.class)
 public class LevelRendererMixin {
 	@Inject(method = "render", at = @At("HEAD"), cancellable = true)

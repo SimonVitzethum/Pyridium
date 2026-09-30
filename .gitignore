@@ -1,6 +1,8 @@
 .gradle/
 build/
 run/
+.mcsrc/
+.mcassets/
 **/.zig-cache/
 **/zig-out/
 hs_err_pid*.log

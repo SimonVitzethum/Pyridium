@@ -220,7 +220,7 @@ pub fn renderPixelWith(tracer: anytype, p: *const types.RenderParams, s: *const 
             // keine Beleuchtung – das sparte je Wasserpixel vier Schatten-
             // strahlen durch das Wasser und eine Schattierung.
             const refracting = if (first) |f| water_front and
-                @as([*]const types.Material, @ptrFromInt(s.materials))[f.attribute & 0xFF].flags & types.material_refract != 0 else false;
+                @as([*]const types.Material, @ptrFromInt(s.materials))[types.materialIndex(s.reserved_tex, f.attribute)].flags & types.material_refract != 0 else false;
             const sh = if (refracting)
                 shade.shadeGeometry(s, ray.o, ray.d, h, footprint)
             else
@@ -252,7 +252,7 @@ pub fn renderPixelWith(tracer: anytype, p: *const types.RenderParams, s: *const 
                 // Laub mit Lochmuster: die Kanten der Lochzellen zählen wie
                 // Voxelkanten, sonst flimmerten die Löcher bei Bewegung
                 const mats: [*]const types.Material = @ptrFromInt(s.materials);
-                const cells: f32 = if (mats[h.attribute & 0xFF].flags & types.material_cutout != 0) @floatFromInt(@import("dag.zig").cutout_cells) else 1;
+                const cells: f32 = if (mats[types.materialIndex(s.reserved_tex, h.attribute)].flags & types.material_cutout != 0) @floatFromInt(@import("dag.zig").cutout_cells) else 1;
                 var near_edge = false;
                 inline for (0..3) |a| {
                     if (a != axis) {

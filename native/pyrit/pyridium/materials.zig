@@ -80,10 +80,12 @@ fn texture(ctx: ?*anyopaque, rgba: []const u8, w: u32, h: u32) u32 {
     return idx;
 }
 
-/// Material `index` (1..255) festlegen. top/side: RGBA8 w x h (Vanilla-Ausrichtung)
+/// Material `index` (0..4095) festlegen. top/side: RGBA8 w x h (Vanilla-Ausrichtung)
 export fn pyd_material_define(index: u32, top: ?[*]const u8, side: ?[*]const u8, w: u32, h: u32, flags: u32, roughness: f32, emission: f32) i32 {
     root.bind();
     const ctx = world.context() orelse return -1;
+    if (index >= types.max_materials or !std.math.isFinite(roughness) or !std.math.isFinite(emission)) return -1;
+    if ((top != null or side != null) and (w == 0 or h == 0 or w > 4096 or h > 4096)) return -1;
     var m: types.Material = undefined;
     pyrit.pyr_material_default(&m);
     m.flags = types.material_voxel_color;
@@ -99,13 +101,20 @@ export fn pyd_material_define(index: u32, top: ?[*]const u8, side: ?[*]const u8,
             toLinear(ft);
             m.texture = texture(ctx, ft, w, h);
             m.normal_texture = texture(ctx, nm, w, h);
+            if (m.texture == 0 or m.normal_texture == 0) return -1;
             m.normal_strength = 1;
         }
         if (side) |s| {
-            const fs = flipped(s, w, h) catch return -1;
-            defer gpa.free(fs);
-            toLinear(fs);
-            m.side_texture = texture(ctx, fs, w, h);
+            const bytes = @as(usize, w) * h * 4;
+            if (top != null and std.mem.eql(u8, top.?[0..bytes], s[0..bytes])) {
+                m.side_texture = m.texture;
+            } else {
+                const fs = flipped(s, w, h) catch return -1;
+                defer gpa.free(fs);
+                toLinear(fs);
+                m.side_texture = texture(ctx, fs, w, h);
+                if (m.side_texture == 0) return -1;
+            }
             if (flags & flag_side_own_color != 0) m.side_color = .{ 1, 1, 1 };
         }
     }

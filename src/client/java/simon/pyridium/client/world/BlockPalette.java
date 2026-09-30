@@ -33,7 +33,7 @@ import simon.pyridium.client.mixin.SpriteContentsAccessor;
 /**
  * Blockzustand -> Pyrit-Voxel. Materialien entstehen aus den Vanilla-Texturen
  * (Ober- und Seitenflaeche des gebackenen Blockmodells); beleuchtet wird allein
- * mit Pyrits Shading. Attribut: Material in Bits 0-7, sRGB-Farbe in 8-31
+ * mit Pyrits Shading. Attribut: Material in Bits 0-15, RGB565-Tint in 16-31
  * (Tint fuer Gras/Laub, sonst Weiss, damit die Textur ihre Farbe traegt).
  */
 public final class BlockPalette {
@@ -42,8 +42,8 @@ public final class BlockPalette {
 	// Flags von pyd_material_define
 	static final int F_CUTOUT = 1, F_WATER = 2, F_SIDE_OWN = 4, F_EMISSIVE = 8, F_GLASS = 16, F_NO_TEX = 32, F_NATURAL = 64, F_TREE = 128,
 		F_SNOW = 256, F_GRASS = 512;
-	static final int MAT_WATER = 1, MAT_FALLBACK = 255;
-	static final int MAX_MATERIALS = 254;
+    static final int MAT_WATER = 1, MAT_FALLBACK = 4095;
+    static final int MAX_MATERIALS = 4093; // 4094: textured entity voxels
 
 	/** Attribut je Zustands-ID (nach upload) */
 	static int[] ATTR = new int[0];
@@ -84,7 +84,8 @@ public final class BlockPalette {
 		int[] nextMat = {2};
 		BlockStateModelSet models = Minecraft.getInstance().getModelManager().getBlockStateModelSet();
 		DEFS.add(new MatDef(MAT_WATER, null, null, F_WATER, 0.04f, 0f));
-		DEFS.add(new MatDef(MAT_FALLBACK, null, null, F_NO_TEX, 0.85f, 0f));
+        DEFS.add(new MatDef(MAT_FALLBACK, null, null, F_NO_TEX, 0.85f, 0f));
+        DEFS.add(new MatDef(4094, null, null, F_NO_TEX, 0.8f, 0f));
 		int textured = 0, fallback = 0;
 		try {
 			for (int id = 0; id < n; id++) {
@@ -111,14 +112,14 @@ public final class BlockPalette {
 							long r = material(s, models, materials, nextMat, leaves, glass, lava);
 							a = (int)r;
 							// getoente Oberseite: Biomfarbe je Spalte (Sektions-Kern)
-							if (a >>> 8 != 0xFFFFFF && (a & 0xff) != MAT_FALLBACK) {
+                            if (a >>> 16 != 0xFFFF && (a & 0xffff) != MAT_FALLBACK) {
 								if (leaves && !s.is(Blocks.BIRCH_LEAVES) && !s.is(Blocks.SPRUCE_LEAVES)) {
 									f |= TINT_FOLIAGE;
 								} else if (!leaves) {
 									f |= TINT_GRASS;
 								}
 							}
-							if ((a & 0xff) == MAT_FALLBACK) {
+                            if ((a & 0xffff) == MAT_FALLBACK) {
 								fallback++;
 							} else {
 								textured++;
@@ -244,7 +245,7 @@ public final class BlockPalette {
 		Integer mat = materials.get(key);
 		if (mat == null) {
 			if (next[0] > MAX_MATERIALS) {
-				return attr(MAT_FALLBACK, average(top.rgba, top.tinted ? tint : 0xFFFFFF));
+                throw new IllegalStateException("Minecraft-Materialpalette überschreitet " + MAX_MATERIALS);
 			}
 			mat = next[0]++;
 			define(mat, top.rgba, sideImg, flags, emission > 0 || lava ? Math.max(emission, 12) / 15f * 4f : 0f, leaves);
@@ -384,7 +385,8 @@ public final class BlockPalette {
 		return Integer.toHexString(java.util.Arrays.hashCode(px)) + ":" + px.length;
 	}
 
-	private static int attr(int mat, int rgb) {
-		return (mat & 0xff) | (rgb & 0xffffff) << 8;
+    static int attr(int mat, int rgb) {
+        int color = ((rgb >>> 19) & 31) << 11 | ((rgb >>> 10) & 63) << 5 | ((rgb >>> 3) & 31);
+        return (mat & 0xffff) | color << 16;
 	}
 }

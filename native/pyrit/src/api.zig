@@ -3,7 +3,7 @@
 const types = @import("pyrit_device").types;
 
 pub const version_major: u32 = 0;
-pub const version_minor: u32 = 2;
+pub const version_minor: u32 = 3;
 pub const version: u32 = (version_major << 16) | version_minor;
 
 pub const Result = i32;
@@ -30,6 +30,8 @@ pub const create_debug: u32 = 0x1;
 /// muss die Anwendung zwei Sätze von PyrTargets abwechselnd benutzen, sonst
 /// überschreibt der nächste Frame, woraus die Nachbearbeitung noch liest.
 pub const create_async_post: u32 = 0x40;
+/// Material16/RGB565 attributes; legacy material8/RGB24 remains the default.
+pub const create_material16: u32 = 0x80;
 /// RT-Cores nicht verwenden, immer CUDA-Traversierung
 pub const create_no_rt: u32 = 0x2;
 /// RT-Cores immer verwenden (sonst erst ab einigen Instanzen, wo sie schneller sind)

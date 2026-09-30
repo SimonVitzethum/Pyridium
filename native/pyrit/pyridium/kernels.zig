@@ -13,6 +13,47 @@ pub const panic = std.debug.no_panic;
 
 const kernel: std.builtin.CallingConvention = .nvptx_kernel;
 
+/// Model surfaces are voxelized once on CUDA, then reused while poses change.
+export fn pyd_k_model(faces_ptr: u64, face_count: u32, voxels_ptr: u64, count: u32, log2_size: u32) callconv(kernel) void {
+    const bx = asm ("mov.u32 %[v], %ctaid.x;"
+        : [v] "=r" (-> u32),
+    );
+    const tx = asm ("mov.u32 %[v], %tid.x;"
+        : [v] "=r" (-> u32),
+    );
+    const i = bx * 256 + tx;
+    if (i >= count) return;
+    const faces: [*]const t.ModelFace = @ptrFromInt(faces_ptr);
+    const out: [*][4]u32 = @ptrFromInt(voxels_ptr);
+    out[i] = .{ 0, 0, 0, 0 };
+    var f: u32 = 0;
+    while (f < face_count) : (f += 1) {
+        const face = &faces[f];
+        if (i < face.first or i - face.first >= face.steps[0] * face.steps[1]) continue;
+        const j = i - face.first;
+        const u = (@as(f32, @floatFromInt(j % face.steps[0])) + 0.5) / @as(f32, @floatFromInt(face.steps[0]));
+        const v = (@as(f32, @floatFromInt(j / face.steps[0])) + 0.5) / @as(f32, @floatFromInt(face.steps[1]));
+        var voxel: [4]u32 = .{ 0, 0, 0, 0 };
+        inline for (0..3) |a| {
+            const p = face.p[0][a] + (face.p[1][a] - face.p[0][a]) * u + (face.p[2][a] - face.p[0][a]) * v - 0.0001;
+            voxel[a] = @intFromFloat(std.math.clamp(@floor(p), 0, @as(f32, @floatFromInt((@as(u32, 1) << @intCast(log2_size)) - 1))));
+        }
+        var uv: [2]f32 = undefined;
+        inline for (0..2) |a| uv[a] = face.uv[0][a] + (face.uv[1][a] - face.uv[0][a]) * u + (face.uv[2][a] - face.uv[0][a]) * v;
+        const x: u32 = @intFromFloat(std.math.clamp(@floor(uv[0] * @as(f32, @floatFromInt(face.width))), 0, @as(f32, @floatFromInt(face.width - 1))));
+        const y: u32 = @intFromFloat(std.math.clamp(@floor(uv[1] * @as(f32, @floatFromInt(face.height))), 0, @as(f32, @floatFromInt(face.height - 1))));
+        const pixels: [*]const [4]u8 = @ptrFromInt(face.texture);
+        const rgba = pixels[@as(u64, y) * face.width + x];
+        if (@as(u32, rgba[3]) * (face.color >> 24) < 128 * 255) return;
+        const r = @as(u32, rgba[0]) * ((face.color >> 16) & 255) / 255;
+        const g = @as(u32, rgba[1]) * ((face.color >> 8) & 255) / 255;
+        const b = @as(u32, rgba[2]) * (face.color & 255) / 255;
+        voxel[3] = pyr.types.packMaterial16(4094, (r << 16) | (g << 8) | b);
+        out[i] = voxel;
+        return;
+    }
+}
+
 inline fn barrier() void {
     asm volatile ("bar.sync 0;" ::: .{ .memory = true });
 }
@@ -483,7 +524,7 @@ export fn pyd_k_gen_sections(g: pyr.types.WorldGenParams, s: t.SecTable) callcon
         const sf = lk.flags(sid);
         if (sf & (t.state_tint_grass | t.state_tint_foliage) != 0) {
             const col = lk.tint(bp[0], bp[1], bp[2], if (sf & t.state_tint_grass != 0) 0 else 1);
-            if (col != 0) a = (a & 0xff) | (col << 8);
+            if (col != 0) a = @import("pyrit_device").types.packMaterial16(a & 0xffff, col);
         }
         const counts: [*]u32 = @ptrFromInt(g.counts);
         const out: [*][4]u32 = @ptrFromInt(g.voxels);

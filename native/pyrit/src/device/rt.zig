@@ -22,12 +22,13 @@ pub inline fn unpackCell(c: u64) [3]u32 {
 }
 
 /// Treffer im Objektraum der Geometrie (Voxelkoordinaten global).
-pub fn traceSubtree(g: *const types.RtGeometry, prim: types.RtPrim, o: Vec3, d: Vec3, tmin: f32, tmax: f32, want_attribute: bool, skip: ?*const [4]u64, cut: ?*const [4]u64) ?dag.DagHit {
+pub fn traceSubtree(g: *const types.RtGeometry, prim: types.RtPrim, o: Vec3, d: Vec3, tmin: f32, tmax: f32, want_attribute: bool, skip: ?*const types.MaterialMask, cut: ?*const types.MaterialMask, attribute_format: u32) ?dag.DagHit {
     const cell = unpackCell(prim.cell);
     const shift: u5 = @intCast(g.rt_log2);
     const base = [3]u32{ cell[0] << shift, cell[1] << shift, cell[2] << shift };
     const origin = Vec3{ @floatFromInt(base[0]), @floatFromInt(base[1]), @floatFromInt(base[2]) };
     const sub = dag.Dag{
+        .attribute_format = attribute_format,
         .nodes = @ptrFromInt(g.nodes),
         .leaves = @ptrFromInt(g.leaves),
         // Rang über attr_base: mit Palette sind es 4-Bit-Indizes, ein Zeiger

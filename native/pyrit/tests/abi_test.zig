@@ -76,6 +76,7 @@ test "Konstanten" {
         .{ types.instance_keep_history, c.PYR_INSTANCE_KEEP_HISTORY },
         .{ api.version, c.PYR_VERSION },
         .{ api.create_debug, c.PYR_CREATE_DEBUG },
+        .{ api.create_material16, c.PYR_CREATE_MATERIAL16 },
         .{ api.world_sync, c.PYR_WORLD_SYNC },
         .{ types.clip_loop, c.PYR_CLIP_LOOP },
         .{ api.upscaler_none, c.PYR_UPSCALER_NONE },

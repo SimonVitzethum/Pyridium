@@ -15,6 +15,7 @@
 //! Objektraum: die Geometrie füllt [0, 2^log2_size)^3, ein Voxel ist 1 groß.
 
 const vec = @import("vec.zig");
+const types = @import("types.zig");
 const Vec3 = vec.Vec3;
 
 pub const min_log2: u32 = 3;
@@ -22,6 +23,7 @@ pub const max_log2: u32 = 20;
 pub const max_steps: u32 = 65536;
 
 pub const Dag = struct {
+    attribute_format: u32 = types.attribute_legacy,
     nodes: [*]const u32,
     leaves: [*]const u64,
     /// null: default_attribute für alle Voxel
@@ -112,11 +114,11 @@ pub fn trace(g: *const Dag, o: Vec3, d: Vec3, tmin: f32, tmax: f32, want_attribu
 /// `cut`: Materialien mit Lochmuster (material_cutout); null = keine.
 /// `base`: Ursprung dieses DAGs in einem größeren (Teilbäume der RT-Cores),
 /// damit das Lochmuster auf beiden Wegen an denselben Voxeln sitzt.
-pub fn traceSkipping(g: *const Dag, o: Vec3, d: Vec3, tmin: f32, tmax: f32, want_attribute: bool, skip: ?*const [4]u64, cut: ?*const [4]u64, base: [3]i32) ?DagHit {
-    return walk(false, g, o, d, tmin, tmax, want_attribute, skip, .{ .cut = cut, .base = base });
+pub fn traceSkipping(g: *const Dag, o: Vec3, d: Vec3, tmin: f32, tmax: f32, want_attribute: bool, skip: ?*const types.MaterialMask, cut: ?*const types.MaterialMask, base: [3]i32) ?DagHit {
+    return walk(false, g, o, d, tmin, tmax, want_attribute, skip, .{ .cut = cut, .base = base, .attribute_format = g.attribute_format });
 }
 
-pub const Cut = struct { cut: ?*const [4]u64 = null, base: [3]i32 = .{ 0, 0, 0 } };
+pub const Cut = struct { cut: ?*const types.MaterialMask = null, base: [3]i32 = .{ 0, 0, 0 }, attribute_format: u32 = types.attribute_legacy };
 
 /// Austritt aus festem Material: erster Punkt ab tmin, an dem der Strahl in
 /// eine leere Zelle übergeht (für transparente Medien). `face` ist die dabei
@@ -133,7 +135,7 @@ pub const cutout_cells: u32 = 3;
 /// Loch im festen Muster der Fläche, durch die der Strahl in den Voxel
 /// eintritt? `p`: Eintrittspunkt im Objektraum, `axis`: Achse der Fläche.
 inline fn cutHole(c: Cut, attribute: u32, voxel: [3]i32, p: Vec3, axis: u32) bool {
-    if (!skipped(c.cut, attribute)) return false;
+    if (!skipped(c.cut, c.attribute_format, attribute)) return false;
     var sub: [2]u32 = .{ 0, 0 };
     var k: u32 = 0;
     inline for (0..3) |a| {
@@ -151,13 +153,13 @@ inline fn cutHole(c: Cut, attribute: u32, voxel: [3]i32, p: Vec3, axis: u32) boo
     return (h & 0xFF) < 77; // etwa 30 % Löcher
 }
 
-inline fn skipped(skip: ?*const [4]u64, attribute: u32) bool {
+inline fn skipped(skip: ?*const types.MaterialMask, format: u32, attribute: u32) bool {
     const m = skip orelse return false;
-    const idx = attribute & 0xFF;
+    const idx = types.materialIndex(format, attribute);
     return (m[idx >> 6] >> @intCast(idx & 63)) & 1 != 0;
 }
 
-fn walk(comptime exit_mode: bool, g: *const Dag, o: Vec3, d: Vec3, tmin: f32, tmax: f32, want_attribute: bool, skip: ?*const [4]u64, cut: Cut) ?DagHit {
+fn walk(comptime exit_mode: bool, g: *const Dag, o: Vec3, d: Vec3, tmin: f32, tmax: f32, want_attribute: bool, skip: ?*const types.MaterialMask, cut: Cut) ?DagHit {
     const n: u32 = @as(u32, 1) << @intCast(g.log2_size);
     const nf: f32 = @floatFromInt(n);
 
@@ -251,8 +253,8 @@ fn walk(comptime exit_mode: bool, g: *const Dag, o: Vec3, d: Vec3, tmin: f32, tm
                 // Schatten- und GI-Strahlen von dort sofort verdeckt und jedes
                 // Loch zeigte schwarz.
                 const at_start = starts_inside and !moved;
-                const through_leaf = if (at_start) skipped(cut.cut, attribute) else cutHole(cut, attribute, voxel, o + d * @as(Vec3, @splat(t)), axis);
-                if (skipped(skip, attribute) or through_leaf) {
+                const through_leaf = if (at_start) skipped(cut.cut, g.attribute_format, attribute) else cutHole(cut, attribute, voxel, o + d * @as(Vec3, @splat(t)), axis);
+                if (skipped(skip, g.attribute_format, attribute) or through_leaf) {
                     scale = 0;
                     // wie "Zelle leer": zur nächsten Zelle derselben Größe
                     const size0: u32 = 1;

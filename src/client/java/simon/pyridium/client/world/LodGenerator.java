@@ -811,6 +811,6 @@ public final class LodGenerator {
 		if (rgb < 0 || attr == 0) {
 			return attr;
 		}
-		return (attr & 0xff) | (rgb & 0xffffff) << 8;
+        return BlockPalette.attr(attr & 0xffff, rgb);
 	}
 }

@@ -21,14 +21,19 @@ import simon.pyridium.client.gpu.Native;
  * synchron: neue Chunks, Blockaenderungen, entladene Chunks.
  */
 public final class SectionSync {
-	private static final LongLinkedOpenHashSet DIRTY = new LongLinkedOpenHashSet();
+    private static final LongLinkedOpenHashSet DIRTY = new LongLinkedOpenHashSet();
+    private static final java.util.concurrent.ConcurrentMap<Long, LevelChunk> LOADED = new java.util.concurrent.ConcurrentHashMap<>();
+
+    /** Loaded chunk data, independent of Vanilla's disabled terrain meshes. */
+    public static Iterable<LevelChunk> loadedChunks() { return LOADED.values(); }
 	/** 4096 Zustaende (u16), danach Gras- und Laubfarbe je Blockspalte (u32) – types.zig slot_bytes */
 	private static boolean statesUploaded;
 
 	private SectionSync() {
 	}
 
-	public static void reset() {
+    public static void reset() {
+        LOADED.clear();
 		synchronized (DIRTY) {
 			DIRTY.clear();
 		}
@@ -44,14 +49,16 @@ public final class SectionSync {
 		}
 	}
 
-	public static void chunkLoaded(ClientLevel level, LevelChunk chunk) {
+    public static void chunkLoaded(ClientLevel level, LevelChunk chunk) {
+        LOADED.put(ChunkPos.pack(chunk.getPos().x(), chunk.getPos().z()), chunk);
 		int cx = chunk.getPos().x(), cz = chunk.getPos().z();
 		for (int sy = level.getMinSectionY(); sy <= level.getMaxSectionY(); sy++) {
 			markDirty(cx, sy, cz);
 		}
 	}
 
-	public static void chunkUnloaded(ClientLevel level, LevelChunk chunk) {
+    public static void chunkUnloaded(ClientLevel level, LevelChunk chunk) {
+        LOADED.remove(ChunkPos.pack(chunk.getPos().x(), chunk.getPos().z()));
 		int cx = chunk.getPos().x(), cz = chunk.getPos().z();
 		Native.colSet(cx, cz, false);
 		PENDING.remove(ChunkPos.pack(cx, cz));

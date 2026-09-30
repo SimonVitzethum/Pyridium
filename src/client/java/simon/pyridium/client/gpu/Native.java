@@ -21,7 +21,8 @@ public final class Native {
 	private static final ValueLayout.OfLong L = ValueLayout.JAVA_LONG;
 	private static final ValueLayout.OfInt I = ValueLayout.JAVA_INT;
 
-	private static SymbolLookup lib;
+    private static SymbolLookup lib;
+    private static MethodHandle hModelCreate, hModelsFrame;
 	private static final Linker LINKER = Linker.nativeLinker();
 
 	private static MethodHandle hInit, hError, hAlloc, hFree, hUpload, hUpload2d, hDownload2d, hCopy, hCopy2d, hSync, hFill,
@@ -36,7 +37,9 @@ public final class Native {
 		}
 		Path path = locate();
 		lib = SymbolLookup.libraryLookup(path, Arena.global());
-		hInit = fn("pyd_init", FunctionDescriptor.of(I));
+        hInit = fn("pyd_init", FunctionDescriptor.of(I));
+        hModelCreate = fn("pyd_model_create", FunctionDescriptor.of(L, L, I, I, I));
+        hModelsFrame = fn("pyd_models_frame", FunctionDescriptor.of(I, L, I));
 		hError = fn("pyd_error", FunctionDescriptor.of(ValueLayout.ADDRESS));
 		hAlloc = fn("pyd_alloc", FunctionDescriptor.of(L, L));
 		hFree = fn("pyd_free", FunctionDescriptor.ofVoid(L));
@@ -70,13 +73,25 @@ public final class Native {
 		hDeviceName = fn("pyd_device_name", FunctionDescriptor.of(I, L, I));
 	}
 
-	private static MethodHandle fn(String name, FunctionDescriptor d) {
+    private static MethodHandle fn(String name, FunctionDescriptor d) {
 		MemorySegment s = lib.find(name).orElseThrow(() -> new IllegalStateException("libpyridium: " + name + " fehlt"));
 		// CUDA calls can block, and worldFrame can call the Java LOD generator
 		// on this thread. Critical downcalls forbid upcalls and caused a fatal
 		// JVM thread-state assertion in the synchronous headless test path.
 		return LINKER.downcallHandle(s, d);
-	}
+    }
+
+    public static long modelCreate(long faces, int faceCount, int voxelCount, int log2Size) {
+        try {
+            return (long)hModelCreate.invokeExact(faces, faceCount, voxelCount, log2Size);
+        } catch (Throwable t) { throw wrap(t); }
+    }
+
+    public static void modelsFrame(long instances, int count) {
+        try {
+            check((int)hModelsFrame.invokeExact(instances, count), "modelsFrame");
+        } catch (Throwable t) { throw wrap(t); }
+    }
 
 	/** Entwicklung: -Dpyridium.nativeDir; sonst aus dem Jar entpacken. */
 	private static Path locate() {

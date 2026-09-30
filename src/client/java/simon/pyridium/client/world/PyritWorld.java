@@ -41,7 +41,9 @@ public final class PyritWorld {
 		created = false;
 		ready = false;
 		failed = false;
-		SectionSync.reset();
+        SectionSync.reset();
+        EntityScene.reset();
+        RendererTestFixture.reset();
 	}
 
 	public static int mode() {
@@ -103,7 +105,8 @@ public final class PyritWorld {
 				f = new Vector3f((float)(-Math.sin(yaw) * Math.cos(pitch)), (float)-Math.sin(pitch), (float)(Math.cos(yaw) * Math.cos(pitch)));
 				u = new Vector3f(0, 1, 0);
 			}
-			MemoryUtil.memPutDouble(a, p.x);
+            EntityScene.render(camera, p);
+            MemoryUtil.memPutDouble(a, p.x);
 			MemoryUtil.memPutDouble(a + 8, p.y);
 			MemoryUtil.memPutDouble(a + 16, p.z);
 			MemoryUtil.memPutFloat(a + 24, f.x);

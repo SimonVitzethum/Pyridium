@@ -20,7 +20,8 @@ public class MinecraftMixin {
 	/** Testschalter -Dpyridium.autoQuit=Sekunden: "Speichern und zum Titelbild" ausloesen */
 	@Inject(method = "tick", at = @At("TAIL"))
 	private void pyridium$autoQuit(CallbackInfo ci) {
-		Minecraft mc = (Minecraft)(Object)this;
+        Minecraft mc = (Minecraft)(Object)this;
+        simon.pyridium.client.world.RendererTestFixture.tick(mc);
 		// A headless test must also terminate if onboarding or world loading
 		// prevents joining. Independent of the in-world autoQuit timer.
 		if (Boolean.getBoolean("pyridium.headless")) {

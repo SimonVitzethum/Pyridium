@@ -175,7 +175,9 @@ fn generate(user: ?*anyopaque, params: *const types.WorldGenParams, stream: ?*an
     if (lod_cb) |cb| {
         handled = cb(@intFromPtr(h_keys.items.ptr), @intCast(n), params.voxels, params.counts, @intCast(params.capacity), @intFromPtr(h_known.items.ptr)) == 1;
     }
-    if (!handled) scene.Generator.generate(@ptrCast(&S.gen), params, stream);
+    // Never substitute a different demo world for missing Minecraft data.
+    // Counts were cleared by Pyrit; loaded sections below remain renderable.
+    if (!handled) _ = G.drv.cuMemsetD8Async(params.counts, 0, @as(usize, n) * 4, st);
     if (gen_sec == null) return;
     var any = false;
     for (h_known.items) |k| any = any or k != 0;
@@ -210,9 +212,10 @@ export fn pyd_world_create(seed: u64, mode: u32) i32 {
     }
     const gpa = std.heap.c_allocator;
     var ci = scene.createInfo(0);
+    ci.flags |= api.create_material16;
     ci.cuda_context = @ptrCast(G.ctx);
     ci.cuda_stream = @ptrCast(G.stream);
-    ci.max_textures = 4096; // Vanilla: bis 3 Texturen je Material
+    ci.max_textures = 16384; // Material16: bis 3 Texturen je Material plus Himmel
     // Speicher nach freiem VRAM: Reserve für Ziele, DLSS, Generator und andere Programme,
     // der Rest für die DAG-Pools (40 % Knoten, 35 % Blätter, 25 % Attribute)
     var free_b: usize = 0;
@@ -226,10 +229,6 @@ export fn pyd_world_create(seed: u64, mode: u32) i32 {
     ci.attribute_pool_bytes = pools * 25 / 100;
     std.debug.print("[pyridium] VRAM frei {d} MiB: DAG-Pools {d} MiB\n", .{ free_b >> 20, pools >> 20 });
     if (!req(pyrit.pyr_create(&ci, @ptrCast(&S.ctx)), "Kontext")) return -1;
-    scene.materials(S.ctx, gpa) catch {
-        root.setError("Materialien", .{});
-        return -1;
-    };
     S.gen = scene.Generator.init(&G.drv, .{ .seed = @truncate(seed) }) catch {
         root.setError("Generator", .{});
         return -1;
@@ -294,6 +293,11 @@ fn dlssWarm() void {
 
 pub fn context() ?*anyopaque {
     return if (S.ready) S.ctx else null;
+}
+
+pub fn restTest(start_ns: i64) bool {
+    S.test_budget.rest(&G.drv, start_ns) catch return false;
+    return true;
 }
 
 /// Streaming policy and frame-time target. 0 FPS disables adaptation.
@@ -408,6 +412,7 @@ export fn pyd_world_destroy() void {
     if (!S.ready) return;
     lod_cb = null;
     _ = G.drv.cuCtxSynchronize();
+    @import("models.zig").reset();
     for (S.timings) |pair| for (pair) |ev| {
         if (ev != null) _ = G.drv.cuEventDestroy_v2(ev);
     };

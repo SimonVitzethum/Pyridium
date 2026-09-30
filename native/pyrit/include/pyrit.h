@@ -143,6 +143,8 @@ typedef struct PyrTextureData {
     uint32_t reserved_tex_data;
 } PyrTextureData;
 
+#define PYR_MAX_MATERIALS 4096u
+#define PYR_MATERIAL_MASK_WORDS (PYR_MAX_MATERIALS / 64u)
 typedef struct PyrScene {
     uint64_t nodes, leaves, attributes, geometries;   /* Gerätezeiger */
     uint64_t instances, instances_prev;               /* aktueller Frame, Vorframe */
@@ -152,22 +154,23 @@ typedef struct PyrScene {
     double   origin[3], origin_prev[3];
     uint64_t materials;                               /* const PyrMaterial[PYR_MAX_MATERIALS] */
     uint64_t lighting;                                /* const PyrLighting* */
-    uint64_t transparent_materials[4];                /* Bit je Material: PYR_MATERIAL_TRANSPARENT */
-    uint64_t cutout_materials[4];                     /* Bit je Material: PYR_MATERIAL_CUTOUT */
+    uint64_t transparent_materials[PYR_MATERIAL_MASK_WORDS]; /* Bit je Material: PYR_MATERIAL_TRANSPARENT */
+    uint64_t cutout_materials[PYR_MATERIAL_MASK_WORDS];      /* Bit je Material: PYR_MATERIAL_CUTOUT */
     uint64_t textures;                                /* const PyrTextureData[texture_count], 1-basiert */
     uint32_t texture_count;
-    uint32_t reserved_tex;
+    uint32_t reserved_tex; /* attribute format: 0=material8/RGB24, 1=material16/RGB565 */
 } PyrScene;
 
 /* ---------------------------------------------------------------------------
  * Materialien und Licht
  *
- * Voxelattribut: Bits 0..7 = Materialindex, Bits 8..31 = Farbe 0xRRGGBB (sRGB).
+ * Standard: Bits 0..7 = Materialindex, Bits 8..31 = Farbe 0xRRGGBB (sRGB).
+ * Mit PYR_CREATE_MATERIAL16: Bits 0..15 = Materialindex, Bits 16..31 = RGB565-Tint.
+ * Texturen behalten in beiden Formaten volle RGBA8-Farben.
  * Materialien mit PYR_MATERIAL_VOXEL_COLOR multiplizieren ihre Grundfarbe mit
  * der Voxelfarbe. Attribut 0 bedeutet beim DAG-Bau "leer".
  * ------------------------------------------------------------------------- */
 
-#define PYR_MAX_MATERIALS 256u
 #define PYR_MATERIAL_VOXEL_COLOR 0x1u
 /* transparente Ebene: Brechung nach Snell mit ior (sonst gerade hindurch, z. B.
  * dünne Scheiben). Bis zu PYR_MAX_TRANSPARENT_LAYERS Körper je Pixel, jeder mit
@@ -320,7 +323,7 @@ extern "C" {
 #endif
 
 #define PYR_VERSION_MAJOR 0
-#define PYR_VERSION_MINOR 2
+#define PYR_VERSION_MINOR 3
 #define PYR_VERSION ((uint32_t)((PYR_VERSION_MAJOR << 16) | PYR_VERSION_MINOR))
 
 #if defined(_WIN32)
@@ -367,6 +370,7 @@ PYR_API const char* pyr_error_message(void);
  * muss die Anwendung zwei Saetze von PyrTargets abwechselnd benutzen, sonst
  * ueberschreibt der naechste Frame, woraus die Nachbearbeitung noch liest. */
 #define PYR_CREATE_ASYNC_POST 0x40u
+#define PYR_CREATE_MATERIAL16 0x80u /* attribute: material in low 16 bits, RGB565 tint in high 16 bits */
 #define PYR_CREATE_DEBUG 0x1u  /* zusätzliche Prüfungen, synchrone Fehlerberichte */
 #define PYR_CREATE_NO_RT    0x2u  /* RT-Cores nicht verwenden, immer CUDA-Traversierung */
 #define PYR_CREATE_FORCE_RT 0x4u  /* RT-Cores immer verwenden (sonst erst ab einigen Instanzen) */

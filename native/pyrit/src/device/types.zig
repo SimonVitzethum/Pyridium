@@ -159,12 +159,13 @@ pub const Scene = extern struct {
     /// const Lighting*
     lighting: u64,
     /// Bit je Material: gesetzt = material_transparent (für trace_skip_transparent)
-    transparent_materials: [4]u64,
+    transparent_materials: MaterialMask,
     /// Bit je Material: gesetzt = material_cutout
-    cutout_materials: [4]u64,
+    cutout_materials: MaterialMask,
     /// const TextureData[texture_count], 1-basiert angesprochen
     textures: u64,
     texture_count: u32,
+    /// attribute_legacy or attribute_material16 (selected at context creation).
     reserved_tex: u32,
 };
 
@@ -176,7 +177,35 @@ pub const Scene = extern struct {
 // dieser Voxelfarbe. Attribut 0 bedeutet beim DAG-Bau "leer".
 // ---------------------------------------------------------------------------
 
-pub const max_materials: u32 = 256;
+pub const max_materials: u32 = 4096;
+pub const MaterialMask = [max_materials / 64]u64;
+pub const attribute_legacy: u32 = 0;
+pub const attribute_material16: u32 = 1;
+
+pub inline fn materialIndex(format: u32, attribute: u32) u32 {
+    const index = attribute & (if (format == attribute_material16) @as(u32, 0xffff) else 0xff);
+    return if (index < max_materials) index else 0;
+}
+
+/// 16-bit material + RGB565 biome tint; actual texture pixels remain RGBA8.
+pub inline fn packMaterial16(material: u32, rgb: u32) u32 {
+    const color = ((rgb >> 19) & 31) << 11 | ((rgb >> 10) & 63) << 5 | ((rgb >> 3) & 31);
+    return (color << 16) | (material & 0xffff);
+}
+
+pub inline fn tintRgb(format: u32, attribute: u32) u32 {
+    if (format != attribute_material16) return attribute >> 8;
+    const color = attribute >> 16;
+    const r = (color >> 11) & 31;
+    const g = (color >> 5) & 63;
+    const b = color & 31;
+    return ((r << 3 | r >> 2) << 16) | ((g << 2 | g >> 4) << 8) | (b << 3 | b >> 2);
+}
+
+pub inline fn maskAny(mask: *const MaterialMask) bool {
+    for (mask) |word| if (word != 0) return true;
+    return false;
+}
 
 pub const material_voxel_color: u32 = 0x1;
 /// transparente Ebene: Strahl wird nach Snell gebrochen (ior); sonst gerade

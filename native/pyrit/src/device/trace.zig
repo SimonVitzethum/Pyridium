@@ -42,6 +42,7 @@ pub fn dagOf(s: *const types.Scene, g: *const types.GeometryData) dag.Dag {
     else
         null;
     return .{
+        .attribute_format = s.reserved_tex,
         .nodes = nodes + g.node_offset,
         .leaves = leaves + g.leaf_offset,
         .attributes = attributes,
@@ -77,7 +78,7 @@ pub fn traceScene(s: *const types.Scene, o: Vec3, d: Vec3, tmin: f32, tmax: f32,
     var best = tmax;
     var result: ?TraceHit = null;
 
-    const cut: ?*const [4]u64 = if (anyCutout(s)) &s.cutout_materials else null;
+    const cut: ?*const types.MaterialMask = if (anyCutout(s)) &s.cutout_materials else null;
     var i: u32 = 0;
     while (i < s.instance_count) : (i += 1) {
         const in = &inst[i];
@@ -90,7 +91,7 @@ pub fn traceScene(s: *const types.Scene, o: Vec3, d: Vec3, tmin: f32, tmax: f32,
         const dd = vec.xformVector(&in.world_to_object, d);
         // durchsichtige Materialien und Löcher im Laub überspringt schon die
         // Traversierung (die Löcher für jeden Strahl, auch den durch Wasser)
-        const skip: ?*const [4]u64 = if (flags & types.trace_skip_transparent != 0) &s.transparent_materials else null;
+        const skip: ?*const types.MaterialMask = if (flags & types.trace_skip_transparent != 0) &s.transparent_materials else null;
         const icut = if (cutoutHere(in)) cut else null;
         const hit = if (skip != null or icut != null)
             dag.traceSkipping(&g, oo, dd, tmin, best, want_attribute, skip, icut, .{ 0, 0, 0 })
@@ -159,7 +160,7 @@ pub fn hitNormal(s: *const types.Scene, h: types.Hit) Vec3 {
 /// Gibt es überhaupt Material mit Lochmuster? Sonst bleibt die Traversierung
 /// ohne jede Zusatzprüfung.
 pub inline fn anyCutout(s: *const types.Scene) bool {
-    return (s.cutout_materials[0] | s.cutout_materials[1] | s.cutout_materials[2] | s.cutout_materials[3]) != 0;
+    return types.maskAny(&s.cutout_materials);
 }
 
 /// Lochmuster nur auf der feinsten Stufe (ein Voxel höchstens so groß wie
