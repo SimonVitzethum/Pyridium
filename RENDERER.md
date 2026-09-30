@@ -23,7 +23,8 @@ Texturanimationen. Größere Resource-Pack-Texturen werden bisher auf 16×16 abg
 ## Entities
 
 Vanilla extrahiert weiterhin die echten Modelle, Posen, Skins und Modell-Layer.
-CUDA voxelisiert die Oberflächen der ModelPart-Cubes mit deren UVs und Alpha;
+CUDA voxelisiert ModelPart-Cubes, gebackene Item-Quads und Quad-basierte
+Custom-Geometry-Submissions mit ihren echten Texturen, UVs und Alpha;
 Pyrit baut und rendert diese als wiederverwendbare HashDAG-Geometrien. Animation
 wird durch stabile Instanzen mit wechselnden Posen und Motion-History übertragen.
 Die Poseberechnung bleibt Java-seitig; der Grafikpfad ist CUDA/OptiX.
@@ -34,9 +35,27 @@ Im Lebenszyklustest wurden die drei Testmobs entfernt: der Cache schrumpfte von
 Die Sichtbarkeitsprüfung und Block-Entity-Erfassung hängen nicht mehr von
 abgeschalteten Vanilla-Terrain-Meshes ab. Geprüft: Kuh, Schwein, Zombie und Truhe
 mit Texturen und Schatten; 51 Modellinstanzen bei 27 stabil gecachten Geometrien.
-**Nicht vollständig:** zusätzliche Feature-Submissions wie Item-Quads,
-Namensschilder, Partikel, Feuer, Leinen, Glint und manche Spezialmodelle benötigen
-noch eigene Übernahme. Nicht übernommene Featuregruppen erscheinen im Testlog.
+Im erweiterten fensterlosen Test werden außerdem gedroppte Items (Diamant und
+Grasblock), ein gehaltenes Diamantschwert, ein Diamanthelm und ein
+Drachenfeuerball übernommen. Drei Item- und eine Custom-Instanz sind im Log
+bestätigt; die Testaufnahme zeigt die Ausrüstung, den Grasblock und Feuerball.
+Stabile Geometrie bleibt beim Drehen/Bewegen gecacht. Custom-Callbacks liefern
+lokale Vertex-Metadaten, keine CPU-voxelisierten Ersatzmodelle.
+
+Der gemeinsame 128-Byte-Flächendeskriptor unterstützt vier Eckpositionen,
+UVs und ARGB-Farben. CUDA interpoliert entlang der Vanilla-Diagonale 0→2,
+unterstützt untexturierte Quads und sucht Samplebereiche binär statt linear.
+Die Übergabe an Pyrits separaten DAG-Stream wartet explizit auf die Voxelisierung.
+
+**Nicht vollständig:** Namensschilder, Partikel, Feuer am Entity, Leinen,
+Glint, zusätzliche Blockmodell-Submissions und Nicht-Quad-Spezialgeometrie
+benötigen noch Übernahme. Custom-Geometrie über 16 Blöcke Kantenlänge,
+8192 Quads oder 1.048.576 Samples wird mit einer Warnung nicht übernommen.
+Alpha wird als Cutout abgetastet, nicht als vollständiges Vanilla-Blending;
+Shader-Spezialeffekte und animierte Texturen sind noch nicht vollständig.
+Änderungen an Custom-UVs oder -Eckfarben können einen neuen DAG-Bau auslösen.
+Nicht übernommene Featuregruppen erscheinen im Testlog; ein leerer Zähler ist
+kein Nachweis vollständiger Entity-Unterstützung.
 
 ## Worldgen
 
@@ -57,13 +76,18 @@ GPU-Terrain allein beweist das nicht.
 
 - `./gradlew compileClientJava` und `zig build test` in `native/pyrit`.
 - `python3 tools/check_model_voxels.py <pyridium_kernels.ptx>` prüft CUDA-UVs,
-  Alpha, Tönung und Voxelkoordinaten gegen eine unabhängige CPU-Referenz.
+  Alpha, Tönung, Voxelkoordinaten, verzerrte Quads, Eckfarben, untexturierte
+  Geometrie und 257 Flächenbereiche gegen eine unabhängige CPU-Referenz
+  (sechs Fälle).
 - `python3 tools/check_lod_voxels.py build/cuda/wg_lod_voxels.ptx` prüft
   Terrain-Oberflächen und Überlaufzählung.
 - Integrationstests benutzen SDLs Dummy-Treiber, `pyridium.headless=true`, einen
   **kopierten Test-Spielstand** und `PYRIDIUM_TEST_GPU_DUTY=0.5`. `testEntities`
   ist ein ausdrücklich aktivierter Testschalter und verändert die Testwelt.
   Niemals mit einem wichtigen Spielstand verwenden.
+- `pyridium.testEntityFeatures=true` erweitert die explizite Test-Entity-Fixture
+  um Item- und Spezialgeometrie. Auch dieser Schalter verändert nur die dafür
+  bereitgestellte Testwelt; nicht für einen wichtigen Spielstand benutzen.
 - Für das gemeinsame Testbudget sind unabhängiges Prefetch und serverseitige
   GPU-Terrain-Jobs in diesen Renderer-Tests abgeschaltet. Fern-LOD bleibt CUDA.
   Solche Tests beweisen deshalb nicht die GPU-Worldgen des Serverpfads.

@@ -33,17 +33,18 @@ pub const Tex = extern struct {
 };
 
 pub const mode_color: u32 = 0;
-/// Minecraft surface quad in local voxel coordinates. Java ABI: 96 bytes.
+/// Minecraft surface quad in local voxel coordinates. Java ABI: 128 bytes.
+/// Contiguous sample ranges, four corners in Vanilla order; texture=0 means white.
 pub const ModelFace = extern struct {
     texture: u64,
     width: u32,
     height: u32,
-    color: u32, // Vanilla ARGB tint
     first: u32,
     steps: [2]u32,
-    p: [3][3]f32, // corners 0, 1, 3
-    uv: [3][2]f32,
     reserved: u32 = 0,
+    p: [4][3]f32,
+    uv: [4][2]f32,
+    color: [4]u32, // Vanilla ARGB per vertex
 };
 
 /// Stable identity + cached geometry + animated pose. Java ABI: 64 bytes.
@@ -54,7 +55,7 @@ pub const ModelInstance = extern struct {
 };
 
 comptime {
-    if (@sizeOf(ModelFace) != 96 or @offsetOf(ModelFace, "uv") != 68) @compileError("ModelFace-Layout");
+    if (@sizeOf(ModelFace) != 128 or @offsetOf(ModelFace, "uv") != 80 or @offsetOf(ModelFace, "color") != 112) @compileError("ModelFace-Layout");
     if (@sizeOf(ModelInstance) != 64) @compileError("ModelInstance-Layout");
 }
 pub const mode_tex: u32 = 1;

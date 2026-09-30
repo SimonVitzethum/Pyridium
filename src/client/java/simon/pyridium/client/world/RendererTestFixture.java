@@ -47,6 +47,17 @@ public final class RendererTestFixture {
                 "time set midnight"
             };
             for (String command : commands) server.getCommands().performPrefixedCommand(source, command);
+            if (Boolean.getBoolean("pyridium.testEntityFeatures")) {
+                String[] features = {
+                    "summon minecraft:item 999 181 1003 {NoGravity:1b,PickupDelay:32767s,Item:{id:\"minecraft:diamond\",count:1},Tags:[\"pyridium_test\"]}",
+                    "summon minecraft:item 1002 181 1003 {NoGravity:1b,PickupDelay:32767s,Item:{id:\"minecraft:grass_block\",count:1},Tags:[\"pyridium_test\"]}",
+                    "item replace entity @e[type=minecraft:zombie,tag=pyridium_test,limit=1] weapon.mainhand with minecraft:diamond_sword",
+                    "item replace entity @e[type=minecraft:zombie,tag=pyridium_test,limit=1] armor.head with minecraft:diamond_helmet",
+                    "summon minecraft:dragon_fireball 997 182 1004 {NoGravity:1b,Motion:[0.0d,0.0d,0.0d],Tags:[\"pyridium_test\"]}",
+                    "summon minecraft:experience_orb 1000 181 1004 {NoGravity:1b,Value:5s,Tags:[\"pyridium_test\"]}"
+                };
+                for (String command : features) server.getCommands().performPrefixedCommand(source, command);
+            }
         });
     }
 }

@@ -23,11 +23,13 @@ pub fn reset() void {
 export fn pyd_model_create(faces: [*]const t.ModelFace, face_count: u32, count: u32, log2_size: u32) u64 {
     root.bind();
     const ctx = world.context() orelse return 0;
-    if (face_count == 0 or face_count > 6 or count == 0 or count > 1 << 20 or log2_size < 3 or log2_size > 9) return 0;
+    if (face_count == 0 or face_count > 8192 or count == 0 or count > 1 << 20 or log2_size < 3 or log2_size > 9) return 0;
+    var expected: u32 = 0;
     for (faces[0..face_count]) |f| {
-        if (f.texture == 0 or f.width == 0 or f.height == 0 or f.width > 16384 or f.height > 16384 or
+        if (f.width == 0 or f.height == 0 or f.width > 16384 or f.height > 16384 or f.reserved != 0 or
             f.steps[0] == 0 or f.steps[1] == 0 or f.steps[0] > 512 or f.steps[1] > 512 or
-            f.first > count or @as(u64, f.steps[0]) * f.steps[1] > count - f.first) return 0;
+            f.first != expected or f.first > count or @as(u64, f.steps[0]) * f.steps[1] > count - f.first) return 0;
+        expected += f.steps[0] * f.steps[1];
         for (f.p) |p| for (p) |v| {
             if (!std.math.isFinite(v)) return 0;
         };
@@ -35,6 +37,7 @@ export fn pyd_model_create(faces: [*]const t.ModelFace, face_count: u32, count: 
             if (!std.math.isFinite(v)) return 0;
         };
     }
+    if (expected != count) return 0;
     const start = Budget.now();
     defer {
         _ = world.restTest(start);
@@ -56,6 +59,10 @@ export fn pyd_model_create(faces: [*]const t.ModelFace, face_count: u32, count: 
     var size = log2_size;
     var args = [_]?*anyopaque{ @ptrCast(&d_faces), @ptrCast(&nfaces), @ptrCast(&d_voxels), @ptrCast(&n), @ptrCast(&size) };
     if (!root.ok(G.drv.cuLaunchKernel(func, (count + 255) / 256, 1, 1, 256, 1, 1, 0, G.stream, &args, null), "Modellvoxelisierung")) return 0;
+    // Pyridium's texture/voxel stream and Pyrit's DAG stream are nonblocking.
+    // Hand off only completed samples; cached builds already wait for the DAG
+    // result, so this does not introduce synchronization in the per-frame path.
+    if (!root.ok(G.drv.cuStreamSynchronize(G.stream), "Modellvoxel bereit")) return 0;
     var geometry: pyrit.api.Handle = null;
     if (pyrit.pyr_geometry_build(@ptrCast(ctx), log2_size, @ptrFromInt(d_voxels), count, 0, &geometry) != 0) {
         root.setError("Modell-DAG: {s}", .{pyrit.pyr_error_message()});

@@ -26,28 +26,49 @@ export fn pyd_k_model(faces_ptr: u64, face_count: u32, voxels_ptr: u64, count: u
     const faces: [*]const t.ModelFace = @ptrFromInt(faces_ptr);
     const out: [*][4]u32 = @ptrFromInt(voxels_ptr);
     out[i] = .{ 0, 0, 0, 0 };
-    var f: u32 = 0;
-    while (f < face_count) : (f += 1) {
-        const face = &faces[f];
-        if (i < face.first or i - face.first >= face.steps[0] * face.steps[1]) continue;
+    // Host validates sorted, contiguous ranges. Binary lookup avoids quadratic
+    // work for detailed item meshes and custom submissions with hundreds of quads.
+    var low: u32 = 0;
+    var high = face_count;
+    while (low < high) {
+        const mid = low + (high - low) / 2;
+        if (faces[mid].first <= i) low = mid + 1 else high = mid;
+    }
+    if (low != 0) {
+        const face = &faces[low - 1];
         const j = i - face.first;
+        if (j >= face.steps[0] * face.steps[1]) return;
         const u = (@as(f32, @floatFromInt(j % face.steps[0])) + 0.5) / @as(f32, @floatFromInt(face.steps[0]));
         const v = (@as(f32, @floatFromInt(j / face.steps[0])) + 0.5) / @as(f32, @floatFromInt(face.steps[1]));
+        // Match Vanilla's diagonal 0->2, including non-parallelogram quads and
+        // per-vertex UV/color gradients. Bilinear UVs would distort trapezoids.
+        const weights: [4]f32 = if (u >= v) .{ 1 - u, u - v, v, 0 } else .{ 1 - v, 0, u, v - u };
         var voxel: [4]u32 = .{ 0, 0, 0, 0 };
         inline for (0..3) |a| {
-            const p = face.p[0][a] + (face.p[1][a] - face.p[0][a]) * u + (face.p[2][a] - face.p[0][a]) * v - 0.0001;
+            var p: f32 = -0.0001;
+            inline for (0..4) |k| p += face.p[k][a] * weights[k];
             voxel[a] = @intFromFloat(std.math.clamp(@floor(p), 0, @as(f32, @floatFromInt((@as(u32, 1) << @intCast(log2_size)) - 1))));
         }
-        var uv: [2]f32 = undefined;
-        inline for (0..2) |a| uv[a] = face.uv[0][a] + (face.uv[1][a] - face.uv[0][a]) * u + (face.uv[2][a] - face.uv[0][a]) * v;
+        var uv: [2]f32 = .{ 0, 0 };
+        inline for (0..2) |a| inline for (0..4) |k| {
+            uv[a] += face.uv[k][a] * weights[k];
+        };
         const x: u32 = @intFromFloat(std.math.clamp(@floor(uv[0] * @as(f32, @floatFromInt(face.width))), 0, @as(f32, @floatFromInt(face.width - 1))));
         const y: u32 = @intFromFloat(std.math.clamp(@floor(uv[1] * @as(f32, @floatFromInt(face.height))), 0, @as(f32, @floatFromInt(face.height - 1))));
-        const pixels: [*]const [4]u8 = @ptrFromInt(face.texture);
-        const rgba = pixels[@as(u64, y) * face.width + x];
-        if (@as(u32, rgba[3]) * (face.color >> 24) < 128 * 255) return;
-        const r = @as(u32, rgba[0]) * ((face.color >> 16) & 255) / 255;
-        const g = @as(u32, rgba[1]) * ((face.color >> 8) & 255) / 255;
-        const b = @as(u32, rgba[2]) * (face.color & 255) / 255;
+        const rgba: [4]u8 = if (face.texture == 0) .{ 255, 255, 255, 255 } else blk: {
+            const pixels: [*]const [4]u8 = @ptrFromInt(face.texture);
+            break :blk pixels[@as(u64, y) * face.width + x];
+        };
+        var tint: [4]u32 = undefined;
+        inline for (0..4) |a| {
+            var channel: f32 = 0;
+            inline for (0..4) |k| channel += @as(f32, @floatFromInt((face.color[k] >> @as(u5, @intCast(a * 8))) & 255)) * weights[k];
+            tint[a] = @intFromFloat(std.math.clamp(@round(channel), 0, 255));
+        }
+        if (@as(u32, rgba[3]) * tint[3] < 128 * 255) return;
+        const r = @as(u32, rgba[0]) * tint[2] / 255;
+        const g = @as(u32, rgba[1]) * tint[1] / 255;
+        const b = @as(u32, rgba[2]) * tint[0] / 255;
         voxel[3] = pyr.types.packMaterial16(4094, (r << 16) | (g << 8) | b);
         out[i] = voxel;
         return;
