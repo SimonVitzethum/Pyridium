@@ -59,10 +59,8 @@ export fn pyd_model_create(faces: [*]const t.ModelFace, face_count: u32, count: 
     var size = log2_size;
     var args = [_]?*anyopaque{ @ptrCast(&d_faces), @ptrCast(&nfaces), @ptrCast(&d_voxels), @ptrCast(&n), @ptrCast(&size) };
     if (!root.ok(G.drv.cuLaunchKernel(func, (count + 255) / 256, 1, 1, 256, 1, 1, 0, G.stream, &args, null), "Modellvoxelisierung")) return 0;
-    // Pyridium's texture/voxel stream and Pyrit's DAG stream are nonblocking.
-    // Hand off only completed samples; cached builds already wait for the DAG
-    // result, so this does not introduce synchronization in the per-frame path.
-    if (!root.ok(G.drv.cuStreamSynchronize(G.stream), "Modellvoxel bereit")) return 0;
+    // world creates the Pyrit context with cuda_stream=G.stream. CUDA therefore
+    // orders voxelization before DAG construction without an extra host wait.
     var geometry: pyrit.api.Handle = null;
     if (pyrit.pyr_geometry_build(@ptrCast(ctx), log2_size, @ptrFromInt(d_voxels), count, 0, &geometry) != 0) {
         root.setError("Modell-DAG: {s}", .{pyrit.pyr_error_message()});

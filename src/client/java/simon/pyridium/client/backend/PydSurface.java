@@ -131,7 +131,7 @@ public class PydSurface implements GpuSurfaceBackend {
 				java.nio.file.Path out = java.nio.file.Path.of(dir, String.format("pyd_%03d.png", this.shotIndex++));
 				java.nio.file.Files.createDirectories(out.getParent());
 				img.writeToFile(out);
-				LOGGER.info("Pyridium: Aufnahme {} (Frame {})", out, this.frames);
+				LOGGER.info("Pyridium: Aufnahme {} ({}x{}, Frame {})", out, w, h, this.frames);
 			}
 		} catch (Exception e) {
 			LOGGER.warn("Pyridium: Aufnahme fehlgeschlagen", e);

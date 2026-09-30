@@ -45,7 +45,8 @@ lokale Vertex-Metadaten, keine CPU-voxelisierten Ersatzmodelle.
 Der gemeinsame 128-Byte-Flächendeskriptor unterstützt vier Eckpositionen,
 UVs und ARGB-Farben. CUDA interpoliert entlang der Vanilla-Diagonale 0→2,
 unterstützt untexturierte Quads und sucht Samplebereiche binär statt linear.
-Die Übergabe an Pyrits separaten DAG-Stream wartet explizit auf die Voxelisierung.
+Pyrits Weltkontext teilt den CUDA-Stream der Voxelisierung; die Stream-Reihenfolge
+sichert die Übergabe der fertigen Samples ohne zusätzliche Host-Wartezeit.
 
 **Nicht vollständig:** Namensschilder, Partikel, Feuer am Entity, Leinen,
 Glint, zusätzliche Blockmodell-Submissions und Nicht-Quad-Spezialgeometrie
@@ -56,6 +57,9 @@ Shader-Spezialeffekte und animierte Texturen sind noch nicht vollständig.
 Änderungen an Custom-UVs oder -Eckfarben können einen neuen DAG-Bau auslösen.
 Nicht übernommene Featuregruppen erscheinen im Testlog; ein leerer Zähler ist
 kein Nachweis vollständiger Entity-Unterstützung.
+Vanillas separater First-Person-Hand-/Item-Pass ist ebenfalls noch nicht in
+diesen Welt-Collector integriert; gehaltene Items von Welt-Entities sind davon
+zu unterscheiden.
 
 ## Worldgen
 
@@ -88,10 +92,19 @@ GPU-Terrain allein beweist das nicht.
 - `pyridium.testEntityFeatures=true` erweitert die explizite Test-Entity-Fixture
   um Item- und Spezialgeometrie. Auch dieser Schalter verändert nur die dafür
   bereitgestellte Testwelt; nicht für einen wichtigen Spielstand benutzen.
+- `bash tools/check_renderer.sh 'run/saves/Pyridium Test'` kopiert den angegebenen
+  Spielstand in ein neues temporäres Verzeichnis und prüft Items/Custom-Quads
+  mit **1920×1080 Ausgabe und interner Auflösung**, RR und ohne sichtbares Fenster.
+  Die PNGs bleiben dort erhalten. `targetFps=0` verhindert Auflösungsreduktion;
+  Aufnahmegröße und Entity-Submissions werden im Log geprüft.
+  Der Quellspielstand soll geschlossen sein, damit die Kopie konsistent ist.
 - Für das gemeinsame Testbudget sind unabhängiges Prefetch und serverseitige
   GPU-Terrain-Jobs in diesen Renderer-Tests abgeschaltet. Fern-LOD bleibt CUDA.
   Solche Tests beweisen deshalb nicht die GPU-Worldgen des Serverpfads.
 
+Seit der Freigabe vom 30.09.2026 dürfen auch Tests **100 % GPU** nutzen; der
+Full-HD-Testhelfer verwendet deshalb Duty 1. Für gedrosselte Tests kann weiterhin
+`PYRIDIUM_TEST_GPU_DUTY=0.5` gesetzt werden.
 Die Drosselung begrenzt CUDA-Arbeits-/Pausenzeiten, **keine garantierte
 Hardware-Partitionierung 60/40**. Der andere Java-Prozess wird nicht verändert.
 Ohne die Test-Umgebungsvariable gibt es keine GPU-Drosselung im Produktionspfad.
@@ -100,7 +113,17 @@ FPS mit 50-%-Testpausen bei 1280×720 (unterschiedliche Szenen und Mitbenutzung
 der GPU). Das ist weder ein 165-FPS-Nachweis noch ein
 Benchmark einer vollständig geladenen 1024-Chunk-Welt.
 
+Der neue native Full-HD-Qualitätslauf (RR, `targetFps=0`, Duty 1, 1920×1080,
+1024-Chunk-Sichtradius) erreichte nach dem Laden ungefähr **22–24 tatsächliche
+FPS**. Der Scheduler meldete 33.698 sichtbare LOD-Chunks, 42.436 residente
+Einträge und 0 offene Aufträge, ohne Voxelüberläufe. Das beweist die Übernahme
+der geplanten LOD-Einträge in dieser festen Kamera, nicht vollständige
+Vanilla-GPU-Worldgen oder das 165-FPS-Ziel. Die native Full-HD-Aufnahme zeigt
+Mobs, Ausrüstung, Items, Feuerball, Blocktexturen und Schatten.
+
 `pyridium.viewChunks` ist standardmäßig 1024, `pyridium.targetFps` 165. Minecrafts
 eigener FPS-Deckel wird bei Bedarf auf mindestens dieses Ziel angehoben
 (165 → 170 im 10er-Raster). `targetFps=0` deaktiviert diese Anpassung und die
-adaptive Auflösung. Höhere bereits eingestellte Minecraft-Limits bleiben erhalten.
+adaptive Auflösung und wählt ausdrücklich 100 % interne Renderauflösung; auch
+nach einem Moduswechsel bleibt dies erhalten. Höhere bereits eingestellte
+Minecraft-Limits bleiben erhalten.

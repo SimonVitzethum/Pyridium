@@ -315,7 +315,7 @@ export fn pyd_world_configure(px: f32, view_chunks: u32, target_fps: f32) i32 {
     if (!req(pyrit.pyr_world_configure(@ptrCast(S.ctx), @ptrCast(S.world), &config), "Weltkonfiguration")) return -1;
     S.wi.voxel_pixels = px;
     S.wi.view_distance = config.view_distance;
-    S.resolution.target_fps = target_fps;
+    S.resolution.configure(target_fps);
     return 0;
 }
 
@@ -323,7 +323,9 @@ export fn pyd_world_set_mode(mode: u32) void {
     const m: Mode = @enumFromInt(@min(mode, 4));
     if (m == S.mode) return;
     S.mode = m;
-    S.resolution = .{ .target_fps = S.resolution.target_fps };
+    const target_fps = S.resolution.target_fps;
+    S.resolution = .{};
+    S.resolution.configure(target_fps);
     S.rw = 0; // Ziele neu
 }
 
