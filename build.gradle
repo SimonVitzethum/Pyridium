@@ -1,0 +1,119 @@
+plugins {
+	id 'net.fabricmc.fabric-loom' version "${loom_version}"
+}
+
+repositories {
+	mavenCentral()
+}
+
+loom {
+	splitEnvironmentSourceSets()
+	if (project.hasProperty("pydRunDir")) {
+		runs.named("client") { runDir(file(project.property("pydRunDir")).absolutePath) }
+	}
+	mods {
+		"pyridium" {
+			sourceSet sourceSets.main
+			sourceSet sourceSets.client
+		}
+	}
+}
+
+dependencies {
+	minecraft "com.mojang:minecraft:${project.minecraft_version}"
+	implementation "net.fabricmc:fabric-loader:${project.loader_version}"
+	implementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
+}
+
+java {
+	toolchain { languageVersion = JavaLanguageVersion.of(25) }
+}
+
+// ---- Native Seite (Zig): Pyrit + libpyridium.so ----
+// native/pyrit ist ein Schnappschuss von ~/Schreibtisch/Pyrit (dort wird nichts veraendert).
+// DLSS-SDK: -PdlssSdk=<pfad>, sonst ../Pyrit/DLSS falls vorhanden.
+def nativeSrc = file("native/pyrit")
+def nativeOut = file("$buildDir/native")
+def dlssSdk = project.findProperty("dlssSdk") ?: (file("../Pyrit/DLSS/include").exists() ? file("../Pyrit/DLSS").absolutePath : null)
+tasks.register("buildNative", Exec) {
+	inputs.files(fileTree(nativeSrc) { exclude '.zig-cache/**', 'zig-out/**' }).withPropertyName("src").skipWhenEmpty(false)
+	outputs.file("$nativeOut/libpyridium.so")
+	workingDir nativeSrc
+	def cmd = ["zig", "build", "pyridium", "--release=fast", "--prefix", nativeOut.absolutePath, "--prefix-lib-dir", nativeOut.absolutePath]
+	if (dlssSdk != null) cmd.add("-Ddlss-sdk=" + dlssSdk)
+	commandLine cmd
+}
+processResources {
+	dependsOn("buildNative")
+	from(nativeOut) {
+		include "libpyridium.so"
+		into "natives/linux-x86_64"
+	}
+}
+tasks.named("runClient") {
+	dependsOn("buildNative")
+	jvmArgs("-Dpyridium.nativeDir=${nativeOut}", "--enable-native-access=ALL-UNNAMED")
+	if (project.hasProperty("quickWorld")) {
+		args("--quickPlaySingleplayer", project.property("quickWorld"))
+	}
+	if (project.hasProperty("pydSize")) {
+		def wh = project.property("pydSize").toString().split("x")
+		args("--width", wh[0], "--height", wh[1])
+	}
+	if (project.hasProperty("pydJvm")) {
+		jvmArgs(project.property("pydJvm").toString().split(" "))
+	}
+}
+
+// ---- CUDA-Kernels der exakten Worldgen (Server-Seite) ----
+// nvcc -ptx mit Exaktheits-Flags (kein FMA-Zusammenziehen, IEEE-Division/Wurzel, keine
+// Denormal-Spuelung), damit die GPU bitgleich zu Vanilla rechnet. Die .cu-Quellen liegen zusaetzlich
+// im Jar (NVRTC-Codegen in ExactCudaGen). Ohne nvcc wird uebersprungen (GPU-Terrain dann aus, Vanilla rechnet).
+def cudaSrc = file("src/main/resources/assets/pyridium/cuda")
+def cudaOut = file("$buildDir/cuda")
+def findExecutable = { String name ->
+	for (dir in (System.getenv("PATH") ?: "").split(File.pathSeparator)) {
+		def f = new File(dir, name)
+		if (f.canExecute()) return f.absolutePath
+	}
+	def home = System.getenv("CUDA_PATH")
+	for (p in [home ? "$home/bin/$name" : null, "/opt/cuda/bin/$name", "/usr/local/cuda/bin/$name"]) {
+		if (p != null && new File(p).canExecute()) return p
+	}
+	return null
+}
+tasks.register("compileCuda") {
+	inputs.dir(cudaSrc)
+	outputs.dir(cudaOut)
+	doLast {
+		cudaOut.deleteDir()
+		cudaOut.mkdirs()
+		def nvcc = findExecutable("nvcc")
+		if (nvcc == null) {
+			logger.warn("nvcc nicht gefunden – CUDA-Kernels entfallen (Worldgen rechnet Vanilla)")
+			return
+		}
+		def units = cudaSrc.listFiles().findAll { it.name.endsWith(".cu") }
+		def pool = java.util.concurrent.Executors.newFixedThreadPool(Math.max(1, Runtime.runtime.availableProcessors()))
+		try {
+			def futures = units.collect { f ->
+				pool.submit({
+					def cmd = [nvcc, "-ptx", "-arch=compute_75", "-std=c++17", "-fmad=false", "-prec-div=true", "-prec-sqrt=true", "-ftz=false",
+						"-I" + cudaSrc, "-o", new File(cudaOut, (f.name - ".cu") + ".ptx").toString(), f.toString()].collect { it.toString() }
+					def proc = new ProcessBuilder(cmd as List<String>).redirectErrorStream(true).start()
+					def log = proc.inputStream.text
+					proc.waitFor()
+					if (proc.exitValue() != 0) throw new RuntimeException("nvcc ${f.name}:\n" + log)
+					return log
+				} as java.util.concurrent.Callable)
+			}
+			futures.each { it.get() }
+		} finally {
+			pool.shutdown()
+		}
+	}
+}
+processResources {
+	dependsOn("compileCuda")
+	from(cudaOut) { into "assets/pyridium/shaders/ptx" }
+}

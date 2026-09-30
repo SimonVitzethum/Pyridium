@@ -1,0 +1,24 @@
+{
+	"schemaVersion": 1,
+	"id": "pyridium",
+	"version": "${version}",
+	"name": "Pyridium",
+	"description": "Ersetzt Minecrafts Renderer durch Pyrit: Sparse Voxel Hash-DAGs in CUDA, Pfadverfolgung, DLSS, Ausgabe direkt ueber Wayland. Keine Grafik-API.",
+	"authors": ["SimonVitzethum"],
+	"license": "GPL-3.0-or-later",
+	"environment": "*",
+	"entrypoints": {
+		"main": ["simon.pyridium.Pyridium"],
+		"client": ["simon.pyridium.client.PyridiumClient"]
+	},
+	"mixins": [
+		"pyridium.mixins.json",
+		{ "config": "pyridium.client.mixins.json", "environment": "client" }
+	],
+	"depends": {
+		"fabricloader": ">=0.19.5",
+		"minecraft": "~26.3",
+		"java": ">=25",
+		"fabric-api": "*"
+	}
+}

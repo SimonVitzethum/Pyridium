@@ -1,0 +1,15 @@
+{
+	"required": true,
+	"package": "simon.pyridium.client.mixin",
+	"compatibilityLevel": "JAVA_25",
+	"client": [
+		"PreferredGraphicsApiMixin",
+		"RenderSystemMixin",
+		"LevelRendererMixin",
+		"LevelLoadTrackerMixin",
+		"LevelExtractorMixin",
+		"SpriteContentsAccessor",
+		"MinecraftMixin"
+	],
+	"injectors": { "defaultRequire": 1 }
+}
