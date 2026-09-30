@@ -8,7 +8,11 @@ import java.lang.foreign.MemorySegment;
 import java.lang.foreign.SymbolLookup;
 import java.lang.foreign.ValueLayout;
 import java.lang.invoke.MethodHandle;
+import java.nio.ByteBuffer;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
@@ -22,8 +26,9 @@ import org.jspecify.annotations.Nullable;
  *
  * <p>Puffer: host-beschreibbare Puffer sind gepinnter Host-Speicher plus Geraetekopie; vor jedem
  * Lauf wird der Host-Stand hochgeladen ({@link #upload} einmalig). Readback-Puffer sind gepinnter
- * Host-Speicher, Kopien landen per cuMemcpyDtoHAsync darin. Bindungen setzt {@link Kernel#bind}
- * in das Modul-Global vf_b (wg_prelude.cuh). Ein Primary Context, ein Stream; nicht threadsicher.
+ * Host-Speicher, Kopien landen per cuMemcpyDtoHAsync darin. {@link Kernel#bind} speichert private
+ * Bindungen; vor dem Dispatch werden sie streamgeordnet im geteilten Modul-Global vf_b aktiviert.
+ * Ein Primary Context, ein Stream; nicht threadsicher.
  */
 public final class CudaCompute implements GpuCompute {
     /** Grund, warum {@link #create()} zuletzt null lieferte. */
@@ -43,17 +48,20 @@ public final class CudaCompute implements GpuCompute {
     private final List<Long> deviceAllocs = new ArrayList<>(), hostAllocs = new ArrayList<>();
     private final Set<Long> readback = new HashSet<>();
     private final List<CudaKernel> kernels = new ArrayList<>();
+    private final HashMap<ByteBuffer, CudaModule> modules = new HashMap<>();
     private @Nullable ExactCudaGen gen;
     private boolean genTried;
 
     /** Driver-API-Funktionen (Symbole mit _v2 wie in cuda.h von CUDA 12/13). */
     private static final class Api {
+        final @Nullable MethodHandle funcLoad;
         final MethodHandle init, deviceGetCount, deviceGet, deviceGetName, deviceGetAttribute, primaryCtxRetain, primaryCtxRelease,
                 ctxSetCurrent, streamCreate, streamSynchronize, streamDestroy, moduleLoadData, moduleGetFunction, moduleGetGlobal,
                 moduleUnload, memAlloc, memFree, memsetD8, memAllocHost, memFreeHost, memcpyHtoD, memcpyHtoDAsync, memcpyDtoHAsync,
                 memcpyDtoDAsync, memcpy2DAsync, memsetD8Async, launchKernel, eventCreate, eventRecord, eventSynchronize, eventElapsedTime, eventDestroy, getErrorName;
 
         Api(SymbolLookup lib) {
+            funcLoad = lib.find("cuFuncLoad").isPresent() ? fn(lib, "cuFuncLoad", PTR) : null;
             init = fn(lib, "cuInit", INT);
             deviceGetCount = fn(lib, "cuDeviceGetCount", PTR);
             deviceGet = fn(lib, "cuDeviceGet", PTR, INT);
@@ -287,51 +295,114 @@ public final class CudaCompute implements GpuCompute {
     // Kernel
     // ---------------------------------------------------------------------------------------
 
-    /** Ein geladenes PTX-Modul mit Einstiegsfunktion und vf_b-Global. */
+    /** Shared modules, private kernel bindings. All binding changes are stream ordered. */
+    final class CudaModule {
+        final ByteBuffer key;
+        final MemorySegment handle;
+        final long vfb, bindingBytes;
+        final HashMap<String, MemorySegment> functions = new HashMap<>();
+        long[] applied;
+        int references;
+
+        CudaModule(ByteBuffer key, byte[] ptx) {
+            this.key = key;
+            try (Arena a = Arena.ofConfined()) {
+                MemorySegment image = a.allocate(ptx.length + 1L);
+                image.asSlice(0, ptx.length).copyFrom(MemorySegment.ofArray(ptx));
+                image.set(ValueLayout.JAVA_BYTE, ptx.length, (byte) 0);
+                MemorySegment m = a.allocate(PTR);
+                call(cu.moduleLoadData, "cuModuleLoadData", m, image);
+                handle = m.get(ValueLayout.ADDRESS, 0);
+                try {
+                    MemorySegment g = a.allocate(LONG), gs = a.allocate(LONG);
+                    call(cu.moduleGetGlobal, "vf_b", g, gs, handle, a.allocateFrom("vf_b"));
+                    vfb = g.get(LONG, 0);
+                    bindingBytes = gs.get(LONG, 0);
+                } catch (RuntimeException e) {
+                    call(cu.moduleUnload, "cuModuleUnload", handle);
+                    throw e;
+                }
+            }
+        }
+
+        MemorySegment function(String entry) {
+            return functions.computeIfAbsent(entry, name -> {
+                try (Arena a = Arena.ofConfined()) {
+                    MemorySegment f = a.allocate(PTR);
+                    call(cu.moduleGetFunction, "cuModuleGetFunction " + name, f, handle, a.allocateFrom(name));
+                    MemorySegment function = f.get(ValueLayout.ADDRESS, 0);
+                    if (cu.funcLoad != null) call(cu.funcLoad, "cuFuncLoad " + name, function);
+                    return function;
+                }
+            });
+        }
+
+        void release() {
+            if (--references == 0) {
+                modules.remove(key);
+                call(cu.moduleUnload, "cuModuleUnload", handle);
+            }
+        }
+    }
+
     final class CudaKernel implements GpuCompute.Kernel {
-        final MemorySegment module, function;
-        final long vfb;
+        final CudaModule module;
+        final MemorySegment function;
         final int block, bindings;
+        long[] bound;
+        long bindingHost;
+        boolean closed;
 
         CudaKernel(byte[] ptx, String entry, int bindings, int block) {
             this.block = block;
             this.bindings = bindings;
-            try (Arena a = Arena.ofConfined()) {
-                MemorySegment image = a.allocate(ptx.length + 1L);
-                image.copyFrom(MemorySegment.ofArray(ptx));
-                image.set(ValueLayout.JAVA_BYTE, ptx.length, (byte) 0);
-                MemorySegment m = a.allocate(PTR);
-                call(cu.moduleLoadData, "cuModuleLoadData " + entry, m, image);
-                module = m.get(ValueLayout.ADDRESS, 0);
-                MemorySegment f = a.allocate(PTR);
-                call(cu.moduleGetFunction, "cuModuleGetFunction " + entry, f, module, a.allocateFrom(entry));
-                function = f.get(ValueLayout.ADDRESS, 0);
-                MemorySegment g = a.allocate(LONG), gs = a.allocate(LONG);
-                call(cu.moduleGetGlobal, "vf_b in " + entry, g, gs, module, a.allocateFrom("vf_b"));
-                vfb = g.get(LONG, 0);
-                if (gs.get(LONG, 0) < 8L * bindings) throw new IllegalStateException("vf_b zu klein fuer " + bindings + " Bindungen");
+            ByteBuffer key = ByteBuffer.wrap(ptx).asReadOnlyBuffer();
+            CudaModule found = modules.get(key);
+            if (found == null) {
+                key = ByteBuffer.wrap(ptx.clone()).asReadOnlyBuffer();
+                found = new CudaModule(key, ptx);
+                modules.put(key, found);
+            }
+            module = found;
+            module.references++;
+            try {
+                if (module.bindingBytes < 8L * bindings) throw new IllegalStateException("vf_b zu klein fuer " + bindings + " Bindungen");
+                function = module.function(entry);
+            } catch (RuntimeException e) {
+                module.release();
+                throw e;
             }
         }
 
         @Override
         public void bind(long[]... bufs) {
             current();
+            if (closed) throw new IllegalStateException("Kernel geschlossen");
             if (bufs.length > bindings) throw new IllegalArgumentException(bufs.length + " Bindungen > " + bindings);
-            long[] ptrs = new long[bufs.length];
+            long[] ptrs = new long[bindings];
             for (int i = 0; i < bufs.length; i++) ptrs[i] = bufs[i][0];
-            try (Arena a = Arena.ofConfined()) {
-                MemorySegment src = a.allocate(8L * ptrs.length);
-                src.copyFrom(MemorySegment.ofArray(ptrs));
-                call(cu.memcpyHtoD, "vf_b setzen", vfb, src, 8L * ptrs.length);
-            }
+            if (Arrays.equals(bound, ptrs)) return;
+            // An earlier queued copy may still read this pinned source.
+            if (bound != null) sync();
+            if (bindingHost == 0) bindingHost = allocHost(Math.max(8, 8L * bindings));
+            MemorySegment.ofAddress(bindingHost).reinterpret(8L * bindings).copyFrom(MemorySegment.ofArray(ptrs));
+            bound = ptrs;
+        }
+
+        void applyBindings() {
+            if (closed || bound == null) throw new IllegalStateException("Kernel geschlossen oder ungebunden");
+            if (Arrays.equals(module.applied, bound)) return;
+            call(cu.memcpyHtoDAsync, "vf_b setzen", module.vfb, MemorySegment.ofAddress(bindingHost), 8L * bindings, stream);
+            module.applied = bound;
         }
 
         @Override
         public void close() {
-            try {
-                cu.moduleUnload.invoke(module);
-            } catch (Throwable ignored) {
-            }
+            if (closed) return;
+            current();
+            sync();
+            closed = true;
+            module.release();
         }
     }
 
@@ -344,18 +415,39 @@ public final class CudaCompute implements GpuCompute {
     }
 
     @Override
-    public GpuCompute.@Nullable Kernel groupKernel(int[] tasks, int[] group, boolean point, int bindings) throws Exception {
+    public List<Kernel> groupKernels(ExactPlan plan, boolean includeExpensive, int bindings) throws Exception {
+        List<Kernel> out = new ArrayList<>(Collections.nCopies(plan.groups.size(), null));
         if (!genTried) {
             genTried = true;
             gen = ExactCudaGen.create(ccMajor, ccMinor);
             if (gen != null) gen.fast = fastMath;
         }
-        if (gen == null) return null;
+        if (gen == null) return out;
         current();
-        byte[] ptx = gen.compile(ExactCudaGen.groupSource(tasks, group, point), "grp" + group[0]);
-        CudaKernel k = new CudaKernel(ptx, point ? "wg_exact_task_pt" : "wg_exact_task", bindings, 128);
-        kernels.add(k);
-        return k;
+        List<Integer> eligible = new ArrayList<>();
+        for (int i = 0; i < plan.groups.size(); i++) {
+            int[] group = plan.groups.get(i);
+            if (includeExpensive ? ExactCudaGen.worthCodegenAll(plan, group) : ExactCudaGen.worthCodegen(plan, group)) eligible.add(i);
+        }
+        int[] tasks = plan.encodeTasks();
+        // Bound compiler memory and JIT latency; do not initialize each specialization separately.
+        for (int first = 0; first < eligible.size(); first += 8) {
+            List<int[]> groups = new ArrayList<>();
+            List<Boolean> points = new ArrayList<>();
+            int end = Math.min(first + 8, eligible.size());
+            for (int j = first; j < end; j++) {
+                int[] group = plan.groups.get(eligible.get(j));
+                groups.add(group);
+                points.add(plan.groupIsPoint(group));
+            }
+            byte[] ptx = gen.compile(ExactCudaGen.batchSource(tasks, groups, points), "groups_" + groups.getFirst()[0]);
+            for (int j = first; j < end; j++) {
+                CudaKernel k = new CudaKernel(ptx, "wg_group_" + plan.groups.get(eligible.get(j))[0], bindings, 128);
+                kernels.add(k);
+                out.set(eligible.get(j), k);
+            }
+        }
+        return out;
     }
 
     // ---------------------------------------------------------------------------------------
@@ -368,6 +460,7 @@ public final class CudaCompute implements GpuCompute {
         for (Dispatch d : list) {
             CudaKernel k = (CudaKernel) d.kernel();
             if (d.gx() > 0 && d.gy() > 0) {
+                k.applyBindings();
                 MemorySegment push = a.allocate(32);
                 push.copyFrom(MemorySegment.ofArray(d.push()));
                 MemorySegment params = a.allocate(PTR);
@@ -398,6 +491,7 @@ public final class CudaCompute implements GpuCompute {
             for (Dispatch d : list) {
                 CudaKernel k = (CudaKernel) d.kernel();
                 if (d.gx() > 0 && d.gy() > 0) {
+                    k.applyBindings();
                     MemorySegment push = a.allocate(32);
                     push.copyFrom(MemorySegment.ofArray(d.push()));
                     MemorySegment params = a.allocate(PTR);

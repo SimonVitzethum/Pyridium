@@ -35,6 +35,7 @@ public final class ExactCudaGen implements AutoCloseable {
 
     private final MethodHandle create, compile, ptxSize, getPtx, logSize, getLog, destroy;
     private final String arch;
+    private final String compilerVersion;
     private final String[] headerSources = new String[HEADERS.length];
 
     private ExactCudaGen(SymbolLookup lib, int major, int minor) throws IOException {
@@ -45,6 +46,13 @@ public final class ExactCudaGen implements AutoCloseable {
         logSize = fn(lib, "nvrtcGetProgramLogSize", PTR, PTR);
         getLog = fn(lib, "nvrtcGetProgramLog", PTR, PTR);
         destroy = fn(lib, "nvrtcDestroyProgram", PTR);
+        try (Arena a = Arena.ofConfined()) {
+            MemorySegment majorVersion = a.allocate(INT), minorVersion = a.allocate(INT);
+            check((int) fn(lib, "nvrtcVersion", PTR, PTR).invoke(majorVersion, minorVersion), "nvrtcVersion");
+            compilerVersion = majorVersion.get(INT, 0) + "." + minorVersion.get(INT, 0);
+        } catch (Throwable e) {
+            throw new IOException("NVRTC version query failed", e);
+        }
         arch = "compute_" + major + minor;
         for (int i = 0; i < HEADERS.length; i++) headerSources[i] = resource(HEADERS[i]);
     }
@@ -138,14 +146,29 @@ public final class ExactCudaGen implements AutoCloseable {
         return body.toString();
     }
 
-    /** CUDA-Quelle einer Gruppe; tasks = {@link ExactPlan#encodeTasks()}. */
-    public static String groupSource(int[] tasks, int[] g, boolean point) throws IOException {
-        String body = groupBody(tasks, g, "0.0f").replace("\n", " ");
+    /** Several entry points, one NVRTC program and one shared vf_b table.
+     * Member guards are reset per specialization; file-scope declarations are
+     * shared. Point and volume kernels remain distinct (no point register
+     * array forced into ordinary volume kernels). */
+    public static String batchSource(int[] tasks, List<int[]> groups, List<Boolean> points) throws IOException {
+        if (groups.isEmpty() || groups.size() != points.size()) throw new IllegalArgumentException("empty/mismatched kernel batch");
         StringBuilder sb = new StringBuilder();
-        sb.append("#define WG_CODEGEN 1\n");
-        sb.append("#define CG_START ").append(g[0]).append('\n');
-        sb.append("#define CG_BODY ").append(body).append('\n');
-        sb.append(resource(point ? "wg_exact_task_pt.cu" : "wg_exact_task.cu"));
+        sb.append("#include \"wg_prelude.cuh\"\n#define VF_SCOPE_FILE\n#define WG_TASK_POINT\n")
+            .append("#include \"wg_exact_task_body.cuh\"\n#undef VF_SCOPE_FILE\n#undef WG_TASK_POINT\n");
+        for (int i = 0; i < groups.size(); i++) {
+            int[] g = groups.get(i);
+            boolean point = points.get(i);
+            String entry = "wg_group_" + g[0];
+            sb.append("#undef VF_WG_EXACT_COMMON_MEMBER\n#undef VF_WG_EXACT_POINT_MEMBER\n")
+                .append("#undef VF_WG_EXACT_TASK_BODY_MEMBER\n#undef WG_EXACT_POINT_MEMBER\n")
+                .append("#define WG_CODEGEN 1\n#define CG_START ").append(g[0]).append('\n')
+                .append("#define CG_BODY ").append(groupBody(tasks, g, "0.0f").replace('\n', ' ')).append('\n')
+                .append("#define VfKernel VfGroup_").append(g[0]).append('\n')
+                .append("#define ").append(point ? "wg_exact_task_pt" : "wg_exact_task").append(' ').append(entry).append('\n')
+                .append(resource(point ? "wg_exact_task_pt.cu" : "wg_exact_task.cu"))
+                .append("\n#undef ").append(point ? "wg_exact_task_pt" : "wg_exact_task")
+                .append("\n#undef VfKernel\n#undef CG_BODY\n#undef CG_START\n#undef WG_CODEGEN\n#undef WG_TASK_POINT\n");
+        }
         return sb.toString();
     }
 
@@ -157,6 +180,16 @@ public final class ExactCudaGen implements AutoCloseable {
             java.security.MessageDigest md = java.security.MessageDigest.getInstance("SHA-256");
             md.update(arch.getBytes(java.nio.charset.StandardCharsets.UTF_8));
             md.update((byte) (fast ? 1 : 0));
+            md.update(compilerVersion.getBytes(StandardCharsets.UTF_8));
+            md.update((byte) 0);
+            // Included headers determine generated code too. A source-only
+            // cache silently reused obsolete shaders after header changes.
+            for (int i = 0; i < headerSources.length; i++) {
+                md.update(HEADERS[i].getBytes(StandardCharsets.UTF_8));
+                md.update((byte) 0);
+                md.update(headerSources[i].getBytes(StandardCharsets.UTF_8));
+                md.update((byte) 0);
+            }
             md.update(source.getBytes(java.nio.charset.StandardCharsets.UTF_8));
             String key = java.util.HexFormat.of().formatHex(md.digest());
             cached = java.nio.file.Path.of(System.getProperty("pyridium.cacheDir", "pyridium-cache"), "ptx", key + ".ptx");

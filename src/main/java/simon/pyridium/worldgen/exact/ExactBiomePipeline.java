@@ -84,17 +84,13 @@ public final class ExactBiomePipeline implements AutoCloseable {
         coords.bind(java.util.Arrays.copyOf(base, 10));
         taskPipe.bind(base);
         biomePipe.bind(bTask, bParam, bLayer, bStack, bSeg, bChunk, bCoord, bScratch, bBp, bNode, bTmp, bOut);
-        if (codegen) {
-            for (int[] g : plan.groups) {
-                GpuCompute.Kernel p = ExactCudaGen.worthCodegen(plan, g) ? vk.groupKernel(tasks, g, false, 11) : null;
-                if (p != null) {
-                    p.bind(base);
-                    pipes.add(p);
-                }
-                groupPipes.add(p);
+        groupPipes.addAll(codegen ? vk.groupKernels(plan, false, 11)
+                : java.util.Collections.nCopies(plan.groups.size(), null));
+        for (GpuCompute.Kernel p : groupPipes) {
+            if (p != null) {
+                p.bind(base);
+                pipes.add(p);
             }
-        } else {
-            for (int i = 0; i < plan.groups.size(); i++) groupPipes.add(null);
         }
     }
 

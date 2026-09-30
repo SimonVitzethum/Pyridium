@@ -11,7 +11,6 @@ const G = &root.G;
 const Entry = struct { handle: pyrit.api.Handle, geometry: u64, seen: u64 };
 var entries: std.AutoHashMapUnmanaged(u64, Entry) = .empty;
 var frame: u64 = 0;
-var func: pyrit.cuda.CUfunction = null;
 
 pub fn reset() void {
     // The owning Pyrit context destroys GPU geometry and instance resources.
@@ -42,7 +41,6 @@ export fn pyd_model_create(faces: [*]const t.ModelFace, face_count: u32, count: 
     defer {
         _ = world.restTest(start);
     }
-    if (func == null and !root.ok(G.drv.cuModuleGetFunction(&func, G.module, "pyd_k_model"), "Modellkernel")) return 0;
     var d_faces: u64 = 0;
     var d_voxels: u64 = 0;
     if (!root.ok(G.drv.cuMemAlloc_v2(&d_faces, face_count * @sizeOf(t.ModelFace)), "Modellflächen")) return 0;
@@ -58,7 +56,7 @@ export fn pyd_model_create(faces: [*]const t.ModelFace, face_count: u32, count: 
     var n = count;
     var size = log2_size;
     var args = [_]?*anyopaque{ @ptrCast(&d_faces), @ptrCast(&nfaces), @ptrCast(&d_voxels), @ptrCast(&n), @ptrCast(&size) };
-    if (!root.ok(G.drv.cuLaunchKernel(func, (count + 255) / 256, 1, 1, 256, 1, 1, 0, G.stream, &args, null), "Modellvoxelisierung")) return 0;
+    if (!root.ok(G.drv.cuLaunchKernel(G.k_model, (count + 255) / 256, 1, 1, 256, 1, 1, 0, G.stream, &args, null), "Modellvoxelisierung")) return 0;
     // world creates the Pyrit context with cuda_stream=G.stream. CUDA therefore
     // orders voxelization before DAG construction without an extra host wait.
     var geometry: pyrit.api.Handle = null;

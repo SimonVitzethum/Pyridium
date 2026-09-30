@@ -138,10 +138,10 @@ public final class ExactLodPipeline implements AutoCloseable {
         task2d.bind(base2);
         taskPt2d.bind(base2);
         biomePipe.bind(t2, p2, l2, st2, sg2, bColumns, coordA, bScratch2d, bBp, bNode, bTmp, sh.biomeOut);
-        for (int[] g : plan2d.groups) {
-            GpuCompute.Kernel p = codegen && ExactCudaGen.worthCodegenAll(plan2d, g) ? gpu.groupKernel(tasks2, g, false, 11) : null;
+        groups2d.addAll(codegen ? gpu.groupKernels(plan2d, true, 11)
+                : java.util.Collections.nCopies(plan2d.groups.size(), null));
+        for (GpuCompute.Kernel p : groups2d) {
             if (p != null) p.bind(base2);
-            groups2d.add(p);
         }
         // vorlaeufige Oberflaeche je Spalte (34 x 34 floats) zum Host
         bPre = gpu.readbackBuffer(4096L * PRE * 4L);
@@ -158,10 +158,10 @@ public final class ExactLodPipeline implements AutoCloseable {
         for (int i = 0; i < 21; i++) base3[i] = i < b3.length ? b3[i] : (i == 20 ? bSlotY : bZero);
         coords3d.bind(base3);
         task3d.bind(base3);
-        for (int[] g : plan3d.groups) {
-            GpuCompute.Kernel p = codegen && ExactCudaGen.worthCodegenAll(plan3d, g) ? gpu.groupKernel(tasks3, g, false, 21) : null;
+        groups3d.addAll(codegen ? gpu.groupKernels(plan3d, true, 21)
+                : java.util.Collections.nCopies(plan3d.groups.size(), null));
+        for (GpuCompute.Kernel p : groups3d) {
             if (p != null) p.bind(base3);
-            groups3d.add(p);
         }
         // --- Voxel
         bLp = gpu.buffer(20 * 4L);

@@ -156,18 +156,13 @@ public final class ExactTerrainPipeline implements AutoCloseable {
                 bSurfIdx, bSurfVal, bSurfPos);
         sfPipe.bind(bTask, bParam, bLayer, bStack, bSeg, bChunk, bCoord, bScratch, bCode, bPParam, bSf, bSubst, bWin, bState,
                 bStateTmp, bCol);
-        groupPipes = new ArrayList<>();
-        if (codegen) {
-            for (int[] g : plan.groups) {
-                GpuCompute.Kernel p = ExactCudaGen.worthCodegen(plan, g) ? vk.groupKernel(tasks, g, plan.groupIsPoint(g), 11) : null;
-                if (p != null) {
-                    p.bind(base);
-                    pipes.add(p);
-                }
-                groupPipes.add(p);
+        groupPipes = codegen ? vk.groupKernels(plan, false, 11)
+                : new ArrayList<>(java.util.Collections.nCopies(plan.groups.size(), null));
+        for (GpuCompute.Kernel p : groupPipes) {
+            if (p != null) {
+                p.bind(base);
+                pipes.add(p);
             }
-        } else {
-            for (int i = 0; i < plan.groups.size(); i++) groupPipes.add(null);
         }
     }
 

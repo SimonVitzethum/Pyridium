@@ -204,6 +204,8 @@ pub const Driver = struct {
     cuModuleLoadDataEx: *const fn (*CUmodule, ?*const anyopaque, c_uint, ?[*]const c_int, ?[*]?*anyopaque) callconv(.c) CUresult,
     cuModuleUnload: *const fn (CUmodule) callconv(.c) CUresult,
     cuModuleGetFunction: *const fn (*CUfunction, CUmodule, [*:0]const u8) callconv(.c) CUresult,
+    /// CUDA 12+: explicitly finish lazy loading before the first frame.
+    cuFuncLoad: ?*const fn (CUfunction) callconv(.c) CUresult = null,
     cuLaunchKernel: *const fn (CUfunction, c_uint, c_uint, c_uint, c_uint, c_uint, c_uint, c_uint, CUstream, ?[*]?*anyopaque, ?[*]?*anyopaque) callconv(.c) CUresult,
     cuImportExternalMemory: *const fn (*CUexternalMemory, *const CUDA_EXTERNAL_MEMORY_HANDLE_DESC) callconv(.c) CUresult,
     cuExternalMemoryGetMappedMipmappedArray: *const fn (*CUmipmappedArray, CUexternalMemory, *const CUDA_EXTERNAL_MEMORY_MIPMAPPED_ARRAY_DESC) callconv(.c) CUresult,
@@ -243,7 +245,11 @@ fn resolve(comptime T: type, lib: *std.DynLib) error{NotFound}!T {
     out.lib = lib.*;
     inline for (std.meta.fields(T)) |f| {
         if (comptime std.mem.eql(u8, f.name, "lib")) continue;
-        @field(out, f.name) = out.lib.lookup(f.type, f.name) orelse return error.NotFound;
+        if (comptime @typeInfo(f.type) == .optional) {
+            @field(out, f.name) = out.lib.lookup(@typeInfo(f.type).optional.child, f.name);
+        } else {
+            @field(out, f.name) = out.lib.lookup(f.type, f.name) orelse return error.NotFound;
+        }
     }
     return out;
 }

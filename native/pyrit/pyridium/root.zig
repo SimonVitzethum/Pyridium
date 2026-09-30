@@ -49,6 +49,8 @@ pub const Gpu = struct {
     k_fill: cuda.CUfunction = null,
     k_present: cuda.CUfunction = null,
     k_flip: cuda.CUfunction = null,
+    k_model: cuda.CUfunction = null,
+    k_gen_sections: cuda.CUfunction = null,
     // Arbeitspuffer für Sprite-Listen
     scratch: u64 = 0,
     scratch_bytes: usize = 0,
@@ -131,9 +133,10 @@ export fn pyd_init() i32 {
         _ = G.drv.cuMemPoolSetAttribute(pool, cuda.CU_MEMPOOL_ATTR_RELEASE_THRESHOLD, @ptrCast(&thr));
     }
     if (!ok(G.drv.cuModuleLoadDataEx(&G.module, ptx.ptr, 0, null, null), "Kernel laden")) return -1;
-    const names = .{ .{ "k_composite", "pyd_k_composite" }, .{ "k_fill", "pyd_k_fill" }, .{ "k_present", "pyd_k_present" }, .{ "k_flip", "pyd_k_flip_copy" } };
+    const names = .{ .{ "k_composite", "pyd_k_composite" }, .{ "k_fill", "pyd_k_fill" }, .{ "k_present", "pyd_k_present" }, .{ "k_flip", "pyd_k_flip_copy" }, .{ "k_model", "pyd_k_model" }, .{ "k_gen_sections", "pyd_k_gen_sections" } };
     inline for (names) |n| {
         if (!ok(G.drv.cuModuleGetFunction(&@field(G, n[0]), G.module, n[1]), n[1])) return -1;
+        if (G.drv.cuFuncLoad) |load| if (!ok(load(@field(G, n[0])), n[1])) return -1;
     }
     G.ready = true;
     ctx_bound = true;

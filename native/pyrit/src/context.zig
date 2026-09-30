@@ -565,6 +565,14 @@ pub const Context = struct {
         try self.check(self.drv.cuModuleGetFunction(&self.fn_edit_apply, self.module, "pyr_k_edit_apply"), "cuModuleGetFunction");
         try self.check(self.drv.cuModuleGetFunction(&self.fn_edit_compact, self.module, "pyr_k_edit_compact"), "cuModuleGetFunction");
         try self.check(self.drv.cuModuleGetFunction(&self.fn_edit_append, self.module, "pyr_k_edit_append"), "cuModuleGetFunction");
+        if (self.drv.cuFuncLoad) |load| {
+            inline for (std.meta.fields(Context)) |field| {
+                if (comptime std.mem.startsWith(u8, field.name, "fn_") and field.type == cuda.CUfunction) {
+                    if (@field(self, field.name) != null)
+                        try self.check(load(@field(self, field.name)), "cuFuncLoad");
+                }
+            }
+        }
     }
 
     pub fn destroy(self: *Context) void {

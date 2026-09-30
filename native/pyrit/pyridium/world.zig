@@ -147,7 +147,6 @@ fn ensureTargets(ow: u32, oh: u32) bool {
     return true;
 }
 
-var gen_sec: cuda.CUfunction = null;
 const LodFn = *const fn (keys: u64, count: i32, voxels: u64, counts: u64, capacity: i32, known: u64) callconv(.c) i32;
 var lod_cb: ?LodFn = null;
 
@@ -173,9 +172,6 @@ fn generate(user: ?*anyopaque, params: *const types.WorldGenParams, stream: ?*an
     const n = params.count;
     if (n == 0) return;
     const st: cuda.CUstream = @ptrCast(stream);
-    if (gen_sec == null) {
-        _ = G.drv.cuModuleGetFunction(&gen_sec, G.module, "pyd_k_gen_sections");
-    }
     h_keys.resize(std.heap.c_allocator, n) catch return;
     h_known.resize(std.heap.c_allocator, n) catch return;
     // Schlüssel holen; danach ist auch Pyrits Nullen der Zähler erledigt
@@ -190,7 +186,6 @@ fn generate(user: ?*anyopaque, params: *const types.WorldGenParams, stream: ?*an
     // Never substitute a different demo world for missing Minecraft data.
     // Counts were cleared by Pyrit; loaded sections below remain renderable.
     if (!handled) _ = G.drv.cuMemsetD8Async(params.counts, 0, @as(usize, n) * 4, st);
-    if (gen_sec == null) return;
     var any = false;
     for (h_known.items) |k| any = any or k != 0;
     if (!any or tab.pool == 0 or tab.state_attr == 0) return;
@@ -207,7 +202,7 @@ fn generate(user: ?*anyopaque, params: *const types.WorldGenParams, stream: ?*an
     tab.known = d_known;
     var g = params.*;
     var args = [_]?*anyopaque{ @ptrCast(&g), @ptrCast(&tab) };
-    _ = G.drv.cuLaunchKernel(gen_sec, n, 1, 1, 256, 1, 1, 0, st, &args, null);
+    _ = G.drv.cuLaunchKernel(G.k_gen_sections, n, 1, 1, 256, 1, 1, 0, st, &args, null);
     // d_known is shared by both workers. It cannot be overwritten while the
     // previous worker's kernel still reads it, even on low-priority streams.
     _ = G.drv.cuStreamSynchronize(st);
@@ -513,6 +508,11 @@ export fn pyd_world_frame(c: *const CamIn) i32 {
     if (!req(pyrit.pyr_postprocess(@ptrCast(S.ctx), S.view, &S.tg, &S.post), "Nachbearbeitung")) return -1;
     _ = G.drv.cuEventRecord(S.timings[slot][1], G.stream);
     if (root.flipCopy(S.ldr, c.target, S.ow, S.oh) != 0) return -1;
+    // Pyridium presents via its shared CUDA stream, not pyr_synchronize.
+    // Explicitly collect Pyrit's diagnostic events after that existing wait;
+    // otherwise the event ring fills and no GPU breakdown is ever reported.
+    if (std.c.getenv("PYRIT_GPU_TIMING") != null)
+        if (!req(pyrit.pyr_synchronize(@ptrCast(S.ctx)), "GPU-Profil")) return -1;
     S.frame += 1;
     S.timing_frame += 1;
     S.test_budget.rest(&G.drv, burst_start) catch {

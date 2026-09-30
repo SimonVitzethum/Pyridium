@@ -45,8 +45,10 @@ public interface GpuCompute extends AutoCloseable {
     /** Kernel nach Name ohne Endung ("wg_exact_task"); block = Gruppengroesse (Threads). */
     Kernel kernel(BinarySource src, String name, int bindings, int block) throws Exception;
 
-    /** Laufzeit-spezialisierte Aufgaben-Gruppe (Codegen) oder null, wenn nicht moeglich. */
-    Kernel groupKernel(int[] tasks, int[] group, boolean point, int bindings) throws Exception;
+    /** Prepare a plan's specializations as compilation batches. One entry per
+     * plan group; null entries use the interpreter. includeExpensive is for LOD.
+     * Binding/dispatch order is unchanged by joint compilation. */
+    List<Kernel> groupKernels(ExactPlan plan, boolean includeExpensive, int bindings) throws Exception;
 
     double run(List<Dispatch> list, List<long[]> copies);
 

@@ -131,9 +131,24 @@ GPU-Terrain allein beweist das nicht.
 
 ## Tests und Leistung
 
+Die Worldgen-Spezialisierungen werden in NVRTC-Gruppen von bis zu acht
+Kernels übersetzt, nicht mehr als ein Modul je Spezialisierung. Identische
+PTX-Module teilen auch zwischen LOD-Stufen ihren CUDA-Modulcode. Die
+Pufferbindungen bleiben pro Kernel unabhängig und werden unmittelbar vor
+dem Dispatch streamgeordnet aktiviert; unveränderte Bindungen werden nicht
+erneut übertragen. Module werden referenzgezählt genau einmal freigegeben.
+Der PTX-Cache berücksichtigt Architektur, Mathematikmodus, NVRTC-Version,
+Quelltext und alle eingebundenen Header. Renderer, Sektions- und Entity-Kernels
+werden bei der Initialisierung aufgelöst und, wenn `cuFuncLoad` verfügbar ist,
+explizit vorab geladen. Das vermeidet Lazy-Loading beim ersten Einsatz,
+garantiert aber weder volle SM-Belegung noch 165 FPS.
+
 - `./gradlew compileClientJava`, `bash tools/check_block_faces.sh` und
   `zig build test` in `native/pyrit` (58 Tests einschließlich PBR, Alpha,
   Spectator-Strahlen, Speichergruppen und VRAM-Policy).
+- `bash tools/check_shader_batches.sh` prüft gemischte Punkt-/Volumen-Kernels
+  in einem Modul, getrennte Bindungen, erneutes Binden und mehrfache Freigabe
+  fensterlos direkt auf CUDA. Das ist kein vollständiger Worldgen-Nachweis.
 - `python3 tools/check_model_voxels.py <pyridium_kernels.ptx>` prüft CUDA-UVs,
   Alpha, Tönung, Voxelkoordinaten, verzerrte Quads, Eckfarben, untexturierte
   Geometrie und 257 Flächenbereiche gegen eine unabhängige CPU-Referenz
@@ -170,6 +185,12 @@ Full-HD-Testhelfer verwendet deshalb Duty 1. Für gedrosselte Tests kann weiterh
 Die Drosselung begrenzt CUDA-Arbeits-/Pausenzeiten, **keine garantierte
 Hardware-Partitionierung 60/40**. Der andere Java-Prozess wird nicht verändert.
 Ohne die Test-Umgebungsvariable gibt es keine GPU-Drosselung im Produktionspfad.
+`PYRIT_GPU_TIMING=1` sammelt die GPU-Ereignisse jetzt auch im Minecraft-
+Ausgabepfad; `PYRIT_GPU_TIMING_PASSES=1` trennt die Replay-Durchgänge.
+Die Full-HD-PBR-Baseline lag bei rund 48 ms GPU-Zeit je Frame, davon etwa
+14 ms Bild-Shading, 14,5 ms Bild-RT, 9 ms GI und 8,2 ms DLSS.
+Während des Weltaufbaus wurden 99 % GPU-Auslastung gemessen. Das beweist
+keine dauerhaft volle oder besonders effiziente Belegung aller Einheiten.
 Die Integrationstests erreichten während des Ladens ungefähr 16–35 tatsächliche
 FPS mit 50-%-Testpausen bei 1280×720 (unterschiedliche Szenen und Mitbenutzung
 der GPU). Das ist weder ein 165-FPS-Nachweis noch ein
