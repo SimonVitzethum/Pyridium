@@ -144,8 +144,8 @@ explizit vorab geladen. Das vermeidet Lazy-Loading beim ersten Einsatz,
 garantiert aber weder volle SM-Belegung noch 165 FPS.
 
 - `./gradlew compileClientJava`, `bash tools/check_block_faces.sh` und
-  `zig build test` in `native/pyrit` (58 Tests einschließlich PBR, Alpha,
-  Spectator-Strahlen, Speichergruppen und VRAM-Policy).
+  `zig build test` in `native/pyrit` (59 Tests einschließlich PBR, Alpha,
+  Spectator-Strahlen, Speichergruppen, VRAM-Policy und Replay-Ausgabe).
 - `bash tools/check_shader_batches.sh` prüft gemischte Punkt-/Volumen-Kernels
   in einem Modul, getrennte Bindungen, erneutes Binden und mehrfache Freigabe
   fensterlos direkt auf CUDA. Das ist kein vollständiger Worldgen-Nachweis.
@@ -191,6 +191,15 @@ Die Full-HD-PBR-Baseline lag bei rund 48 ms GPU-Zeit je Frame, davon etwa
 14 ms Bild-Shading, 14,5 ms Bild-RT, 9 ms GI und 8,2 ms DLSS.
 Während des Weltaufbaus wurden 99 % GPU-Auslastung gemessen. Das beweist
 keine dauerhaft volle oder besonders effiziente Belegung aller Einheiten.
+Replay-Diagnosezähler werden nur mit `PYRIT_REPLAY_STATS` atomar aktualisiert.
+Zwischenstände mit offenen Strahlen schreiben nicht mehr die vollständigen
+G-Buffer; ein Pixel schreibt beim Abschluss oder im letzten budgetierten
+Durchgang. GI beginnt weiterhin erst nach sämtlichen Bild-Durchgängen.
+Ein Regressionstest prüft unveränderte fertige Ausgabe und letzte Annäherung.
+Im erneuten Full-HD-PBR-Test blieb die gesamte GPU-Zeit bei ungefähr 48 ms;
+ein erheblicher FPS-Gewinn durch diese Änderung ist also nicht nachgewiesen.
+Die Versuche mit `PYRIT_REPLAY_NOSPEC=2` (rund 51 ms) und
+`PYRIT_MAXREG=96` (rund 52 ms) waren langsamer und sind keine neuen Standards.
 Die Integrationstests erreichten während des Ladens ungefähr 16–35 tatsächliche
 FPS mit 50-%-Testpausen bei 1280×720 (unterschiedliche Szenen und Mitbenutzung
 der GPU). Das ist weder ein 165-FPS-Nachweis noch ein

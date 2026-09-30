@@ -12,6 +12,73 @@ const testing = std.testing;
 const gpa = testing.allocator;
 const print = std.debug.print;
 
+test "replay writes only resolved/final output and diagnostics are opt-in" {
+    var scene = std.mem.zeroes(types.Scene);
+    var empty_instance = std.mem.zeroes(types.InstanceData);
+    var empty_geometry = std.mem.zeroes(types.GeometryData);
+    scene.instances = @intFromPtr(&empty_instance);
+    scene.geometries = @intFromPtr(&empty_geometry);
+    var p = std.mem.zeroes(types.RenderParams);
+    p.cur.camera.width = 1;
+    p.cur.camera.height = 1;
+    p.cur.camera.scale = .{ 1, 1 };
+    p.cur.camera.view_to_world = common.makeTransform(.{ 0, 1, 0 }, 0, 1, .{ 0, 0, 0 });
+    p.cur.camera.far_plane = 100;
+    var output = std.mem.zeroes(types.Hit);
+    output.instance = 123;
+    p.hits = @intFromPtr(&output);
+    var rays = std.mem.zeroes([types.replay_slots]types.ReplayRay);
+    var hits = std.mem.zeroes([types.replay_slots]types.ReplayHit);
+    var states = [_]u32{0} ** types.replay_slots;
+    var done = [_]u32{0};
+    var list = [_]u32{0} ** types.replay_slots;
+    var count = [_]u32{0} ** (4 + types.replay_slots);
+    var rp = std.mem.zeroes(types.ReplayParams);
+    rp.rays = @intFromPtr(&rays);
+    rp.hits = @intFromPtr(&hits);
+    rp.state = @intFromPtr(&states);
+    rp.done = @intFromPtr(&done);
+    rp.list = @intFromPtr(&list);
+    rp.count = @intFromPtr(&count);
+    rp.rows = 1;
+    rp.capacity = types.replay_slots;
+    pyr.replay.renderPass(&p, &rp, &scene, 0, 0);
+    try testing.expectEqual(@as(u32, 123), output.instance);
+    try testing.expectEqual(@as(u32, 1), count[0]);
+    try testing.expectEqual(@as(u32, 0), done[0]);
+    states[0] = 2;
+    hits[0].instance = types.no_hit;
+    pyr.replay.renderPass(&p, &rp, &scene, 0, 0);
+    try testing.expectEqualDeep(pyr.render.renderPixel(&p, &scene, 0, 0).hit, output);
+    try testing.expectEqual(@as(u32, 1), done[0]);
+    done[0] = 0;
+    states[0] = 0;
+    output.instance = 123;
+    rp.flags = types.replay_final_pass;
+    pyr.replay.renderPass(&p, &rp, &scene, 0, 0);
+    try testing.expectEqual(types.no_hit, output.instance);
+    try testing.expectEqual(@as(u32, 0), done[0]);
+
+    var next: u32 = 0;
+    var pending = false;
+    const tracer = pyr.replay.Tracer{ .rp = &rp, .pixel = 0, .stride = 1, .flags = 0, .next = &next, .pending = &pending };
+    for ([_]u32{ 0, types.replay_diagnostics }) |flags| {
+        rp.flags = flags;
+        next = 0;
+        pending = false;
+        states[0] = 2;
+        rays[0].d = .{ 1, 0, 0 };
+        @memset(&count, 0);
+        _ = tracer.trace(&scene, .{ 0, 0, 0 }, .{ 0, 0, -1 }, 0, 100, 0, 0);
+        try testing.expectEqual(@as(u32, 1), count[0]);
+        try testing.expectEqual(@intFromBool(flags != 0), count[1]);
+        try testing.expectEqual(@intFromBool(flags != 0), count[4]);
+        next = types.replay_slots;
+        _ = tracer.trace(&scene, .{ 0, 0, 0 }, .{ 0, 0, -1 }, 0, 100, 0, 0);
+        try testing.expectEqual(@intFromBool(flags != 0), count[2]);
+    }
+}
+
 test "spectator rays replace approximate cave fillings and retain far terrain/entities" {
     var h = try common.buildSceneDag(gpa, 3);
     defer h.deinit(gpa);
@@ -621,7 +688,10 @@ test "Minecraft leaf alpha: DAG and RT subtree use the identical real texel mask
     var h = try common.buildSceneDag(gpa, 3);
     defer h.deinit(gpa);
     var m = [_]types.Material{pyrit.context.Context.defaultMaterial()} ** 256;
-    for (&m) |*mat| { mat.flags = types.material_cutout | types.material_face_atlas; mat.texture = 1; }
+    for (&m) |*mat| {
+        mat.flags = types.material_cutout | types.material_face_atlas;
+        mat.texture = 1;
+    }
     var rgba = [_][4]u8{.{ 255, 255, 255, 255 }} ** (2 * 2 * 12);
     // Entire WEST tile transparent, all other faces opaque. No procedural
     // hash, voxel coordinate, RGB565 tint or RT-subtree base may alter this.
@@ -643,9 +713,7 @@ test "Minecraft leaf alpha: DAG and RT subtree use the identical real texel mask
     try testing.expect(pyr.dag.traceSkipping(&g, o, d, 0, 100, true, null, &mask, .{ 0, 0, 0 }) == null);
     var prims = try pyrit.rt_prims.extract(gpa, &h.dag, 3);
     defer prims.deinit(gpa);
-    const rg = types.RtGeometry{ .nodes = @intFromPtr(h.dag.nodes.ptr), .leaves = @intFromPtr(h.dag.leaves.ptr),
-        .attributes = @intFromPtr(h.dag.attributes.?.ptr), .prims = @intFromPtr(prims.prims.ptr), .rt_log2 = prims.rt_log2,
-        .default_attribute = 1, .palette = 0 };
+    const rg = types.RtGeometry{ .nodes = @intFromPtr(h.dag.nodes.ptr), .leaves = @intFromPtr(h.dag.leaves.ptr), .attributes = @intFromPtr(h.dag.attributes.?.ptr), .prims = @intFromPtr(prims.prims.ptr), .rt_log2 = prims.rt_log2, .default_attribute = 1, .palette = 0 };
     for (prims.prims) |prim| try testing.expect(pyr.rt.traceSubtree(&rg, prim, o, d, 0, 100, true, null, &mask, types.attribute_legacy, &scene) == null);
     const reverse = pyr.dag.traceSkipping(&g, .{ 9, 2.25, 2.75 }, .{ -1, 0, 0 }, 0, 100, true, null, &mask, .{ 0, 0, 0 });
     try testing.expect(reverse != null); // EAST is opaque

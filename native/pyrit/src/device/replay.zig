@@ -57,7 +57,8 @@ pub const Tracer = struct {
         self.next.* += 1;
         // mehr Aufrufe als Plätze: dieser Strahl bleibt ohne Treffer (selten)
         if (i >= types.replay_slots) {
-            _ = @atomicRmw(u32, @as(*u32, @ptrFromInt(self.rp.count + 8)), .Add, 1, .monotonic);
+            if (self.rp.flags & types.replay_diagnostics != 0)
+                _ = @atomicRmw(u32, @as(*u32, @ptrFromInt(self.rp.count + 8)), .Add, 1, .monotonic);
             return null;
         }
         // Nach einer offenen Anfrage rechnet die Schattierung mit einem
@@ -91,7 +92,7 @@ pub const Tracer = struct {
             };
         }
         // neu oder anders als beim letzten Mal: anfragen
-        if (state[k] == 2) {
+        if (state[k] == 2 and self.rp.flags & types.replay_diagnostics != 0) {
             _ = @atomicRmw(u32, @as(*u32, @ptrFromInt(self.rp.count + 4)), .Add, 1, .monotonic);
             _ = @atomicRmw(u32, @as(*u32, @ptrFromInt(self.rp.count + 16 + 4 * @as(u64, i))), .Add, 1, .monotonic);
         }
@@ -154,7 +155,11 @@ pub fn renderPass(p: *const types.RenderParams, rp: *const types.ReplayParams, s
     var pending = false;
     const t = Tracer{ .rp = rp, .pixel = i, .stride = @as(u64, w) * rp.rows, .flags = trace_flags, .next = &next, .pending = &pending };
     const r = render.renderPixelWith(t, p, s, x, y);
-    render.writePixel(p, @as(u64, y) * w + x, &r);
+    // No pass consumes intermediate G-buffers: GI starts after all image
+    // passes. Write once when resolved, or preserve the existing last-pass
+    // approximation for paths exceeding the fixed replay budget.
+    if (!pending or rp.flags & types.replay_final_pass != 0)
+        render.writePixel(p, @as(u64, y) * w + x, &r);
     if (!pending) done[i] = 1;
 }
 

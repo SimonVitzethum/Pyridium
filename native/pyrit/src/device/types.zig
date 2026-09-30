@@ -661,8 +661,12 @@ pub const ReplayParams = extern struct {
     /// 0 = nach der ersten offenen Anfrage eines Pixels keine weiteren
     /// Strahlen eintragen (sie hingen von einem noch unbekannten Treffer ab)
     speculate: u32,
-    reserved: u32 = 0,
+    /// Diagnostic counters and final fixed-budget output. Same ABI size.
+    flags: u32 = 0,
 };
+
+pub const replay_diagnostics: u32 = 1;
+pub const replay_final_pass: u32 = 2;
 
 pub const replay_block: u32 = 128;
 

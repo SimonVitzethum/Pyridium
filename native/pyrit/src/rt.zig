@@ -583,6 +583,8 @@ pub const Rt = struct {
                 // GI hängt an keinem Primärstrahl: seine Strahlen sind von Anfang an
                 // unabhängig und dürfen gemeinsam in einen Durchgang
                 rp.speculate = @intFromBool(gi or pass >= no_spec);
+                rp.flags = (if (stats) types.replay_diagnostics else 0) |
+                    (if (pass + 1 == passes) types.replay_final_pass else 0);
                 params.replay = rp;
                 var pr = p.*;
                 var tf = p.flags;
