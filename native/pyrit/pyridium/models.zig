@@ -106,3 +106,10 @@ export fn pyd_models_frame(models: [*]const t.ModelInstance, count: u32) i32 {
     for (expired.items) |id| _ = entries.remove(id);
     return 0;
 }
+
+/// Evict a cached model after its instances have expired. Pyrit enforces ownership/refcounts.
+export fn pyd_model_destroy(geometry: u64) i32 {
+    root.bind();
+    const ctx = world.context() orelse return -1;
+    return pyrit.pyr_geometry_destroy(@ptrCast(ctx), @ptrFromInt(geometry));
+}

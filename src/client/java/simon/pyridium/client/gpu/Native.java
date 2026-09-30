@@ -22,7 +22,7 @@ public final class Native {
 	private static final ValueLayout.OfInt I = ValueLayout.JAVA_INT;
 
     private static SymbolLookup lib;
-    private static MethodHandle hModelCreate, hModelsFrame;
+    private static MethodHandle hModelCreate, hModelDestroy, hModelsFrame;
 	private static final Linker LINKER = Linker.nativeLinker();
 
 	private static MethodHandle hInit, hError, hAlloc, hFree, hUpload, hUpload2d, hDownload2d, hCopy, hCopy2d, hSync, hFill,
@@ -39,6 +39,7 @@ public final class Native {
 		lib = SymbolLookup.libraryLookup(path, Arena.global());
         hInit = fn("pyd_init", FunctionDescriptor.of(I));
         hModelCreate = fn("pyd_model_create", FunctionDescriptor.of(L, L, I, I, I));
+        hModelDestroy = fn("pyd_model_destroy", FunctionDescriptor.of(I, L));
         hModelsFrame = fn("pyd_models_frame", FunctionDescriptor.of(I, L, I));
 		hError = fn("pyd_error", FunctionDescriptor.of(ValueLayout.ADDRESS));
 		hAlloc = fn("pyd_alloc", FunctionDescriptor.of(L, L));
@@ -90,6 +91,12 @@ public final class Native {
     public static void modelsFrame(long instances, int count) {
         try {
             check((int)hModelsFrame.invokeExact(instances, count), "modelsFrame");
+        } catch (Throwable t) { throw wrap(t); }
+    }
+
+    public static void modelDestroy(long geometry) {
+        try {
+            check((int)hModelDestroy.invokeExact(geometry), "modelDestroy");
         } catch (Throwable t) { throw wrap(t); }
     }
 

@@ -40,6 +40,19 @@ test "material16 preserves high indices, tint endpoints and transparent traversa
     scene.cutout_materials = skip;
     try testing.expect(pyr.shade.anyTransparent(&scene, 0));
     try testing.expect(pyr.scene.anyCutout(&scene));
+    const materials = try gpa.alloc(types.Material, types.max_materials);
+    defer gpa.free(materials);
+    @memset(materials, std.mem.zeroes(types.Material));
+    materials[1].base_color = .{ 1, 0, 0 };
+    materials[1025].base_color = .{ 0.25, 0.5, 1 };
+    materials[1025].flags = types.material_voxel_color;
+    scene.materials = @intFromPtr(materials.ptr);
+    scene.reserved_tex = format;
+    const untinted = pyr.shade.surface(&scene, a);
+    try testing.expectEqual(vec.Vec3{ 0.25, 0.5, 1 }, untinted.albedo);
+    const tinted = pyr.shade.surface(&scene, types.packMaterial16(1025, 0xff0000));
+    try testing.expectApproxEqAbs(@as(f32, 0.25), tinted.albedo[0], 1e-5);
+    try testing.expect(tinted.albedo[1] < 1e-5 and tinted.albedo[2] < 1e-5);
 }
 
 test "einzelnes Voxel, achsenparallele Strahlen" {

@@ -4,7 +4,6 @@ import com.mojang.blaze3d.vertex.PoseStack;
 import com.mojang.logging.LogUtils;
 import java.nio.ByteBuffer;
 import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.model.Model;
@@ -38,7 +37,12 @@ public final class EntityScene {
     private static long nextIdentity = 1, frame, nextLog;
     private static int instanceCount;
     private record GeometryKey(ModelPart.Cube cube, PydTexture texture, int tint, float u0, float u1, float v0, float v1) {}
-    private record Geometry(long handle, float x, float y, float z) {}
+    private static final class Geometry {
+        final long handle;
+        final float x, y, z;
+        long seen;
+        Geometry(long handle, float x, float y, float z) { this.handle = handle; this.x = x; this.y = y; this.z = z; }
+    }
     private record InstanceKey(boolean blockEntity, long owner, ModelPart.Cube cube, RenderType renderType, int occurrence) {}
     private static final class Identity { final long id = nextIdentity++; long seen; }
 
@@ -80,10 +84,19 @@ public final class EntityScene {
         if (instances == null) instances = MemoryUtil.memAlloc(64 * 256);
         Native.modelsFrame(MemoryUtil.memAddress(instances), instanceCount);
         IDENTITIES.entrySet().removeIf(e -> frame - e.getValue().seen > 120);
+        // Native instances expire after 120 unseen frames. Evict later so an
+        // inactive instance cannot still hold a reference to the geometry.
+        if (frame % 60 == 0) GEOMETRIES.entrySet().removeIf(e -> {
+            if (frame - e.getValue().seen <= 240) return false;
+            if (e.getValue().handle != 0) Native.modelDestroy(e.getValue().handle);
+            return true;
+        });
+        int unhandledGroups = 0;
+        for (var phase : collector.allPhases()) if (!phase.isEmpty()) unhandledGroups++;
         if (System.currentTimeMillis() >= nextLog) {
             nextLog = System.currentTimeMillis() + 10000;
-            LOG.info("Pyridium: {} Entities, {} Block-Entities, {} Modellteile, {} gecachte DAGs",
-                state.entityRenderStates.size(), state.blockEntityRenderStates.size(), instanceCount, GEOMETRIES.size());
+            LOG.info("Pyridium: {} Entities, {} Block-Entities, {} Modellteile, {} gecachte DAGs; {} noch nicht übernommene Featuregruppen",
+                state.entityRenderStates.size(), state.blockEntityRenderStates.size(), instanceCount, GEOMETRIES.size(), unhandledGroups);
         }
         // These snapshots are consumed exactly once, just as Vanilla submitFeatures does.
         state.entityRenderStates.clear();
@@ -104,6 +117,10 @@ public final class EntityScene {
         }
 
         @Override public OrderedSubmitNodeCollector order(int order) { return this; }
+
+        // Pyrit traces physical shadows from the same model geometry. Do not
+        // enqueue Vanilla's duplicate screen-space shadow decals.
+        @Override public void submitShadow(PoseStack poses, float radius, java.util.List<EntityRenderState.ShadowPiece> pieces) {}
 
         @Override
         public <S> void submitModel(Model<? super S> model, S state, PoseStack poses, RenderType renderType,
@@ -132,6 +149,7 @@ public final class EntityScene {
                     uv == null ? 0 : uv.getU(0), uv == null ? 1 : uv.getU(1),
                     uv == null ? 0 : uv.getV(0), uv == null ? 1 : uv.getV(1));
                 Geometry geo = GEOMETRIES.computeIfAbsent(key, k -> createGeometry(k, uv));
+                geo.seen = frame;
                 if (geo.handle == 0) continue; // fully transparent model surface
                 int occurrence = occurrences.merge(cube, 1, Integer::sum);
                 InstanceKey instance = new InstanceKey(blockEntity, owner, cube, type, occurrence);

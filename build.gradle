@@ -44,6 +44,8 @@ tasks.register("buildNative", Exec) {
 	commandLine cmd
 }
 processResources {
+    inputs.property("version", project.version)
+    filesMatching("fabric.mod.json") { expand(version: project.version) }
 	dependsOn("buildNative")
 	from(nativeOut) {
 		include "libpyridium.so"

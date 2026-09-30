@@ -70,10 +70,14 @@ public final class PyritWorld {
 					seed = server.overworld().getSeed();
 				}
 				// Paletten/Materialien vor dem Generator, der sie benutzt
-				Native.worldCreate(seed, mode());
+                Native.worldCreate(seed, mode());
+                float targetFps = Float.parseFloat(System.getProperty("pyridium.targetFps", "165"));
 				// LOD unsichtbar: ein Voxel jeder Stufe hoechstens ~1 Pixel gross
 				Native.worldConfigure(Float.parseFloat(System.getProperty("pyridium.voxelPx", "1.0")),
-					Integer.getInteger("pyridium.viewChunks", 1024), Float.parseFloat(System.getProperty("pyridium.targetFps", "165")));
+                    Integer.getInteger("pyridium.viewChunks", 1024), targetFps);
+                // Vanilla defaults to 120 FPS; that must not cap an explicit 165-FPS renderer target.
+                int limit = Math.clamp((int)(Math.ceil(targetFps / 10) * 10), 10, 260);
+                if (targetFps > 0 && mc.options.framerateLimit().get() < limit) mc.options.framerateLimit().set(limit);
 				SectionSync.tick(0);
 				if (server != null) {
 					LodGenerator.setup(server); // meist schon beim Serverstart geschehen

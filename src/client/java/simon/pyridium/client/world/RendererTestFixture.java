@@ -5,13 +5,31 @@ import net.minecraft.client.Minecraft;
 /** Explicit opt-in fixture for disposable, windowless integration-test worlds. */
 public final class RendererTestFixture {
     private static boolean installed;
+    private static long installedAt;
+    private static int lifecycleStage;
     private RendererTestFixture() {}
-    public static void reset() { installed = false; }
+    public static void reset() { installed = false; installedAt = 0; lifecycleStage = 0; }
 
     public static void tick(Minecraft mc) {
-        if (installed || !Boolean.getBoolean("pyridium.headless") || !Boolean.getBoolean("pyridium.testEntities") ||
+        if (!Boolean.getBoolean("pyridium.headless") || !Boolean.getBoolean("pyridium.testEntities") ||
             mc.level == null || mc.player == null || mc.getSingleplayerServer() == null || !PyritWorld.isReady()) return;
+        if (installed) {
+            if (Boolean.getBoolean("pyridium.testEntityLifecycle")) {
+                long elapsed = System.currentTimeMillis() - installedAt;
+                var server = mc.getSingleplayerServer();
+                if (lifecycleStage == 0 && elapsed >= 20000) {
+                    lifecycleStage = 1;
+                    server.execute(() -> server.getCommands().performPrefixedCommand(server.createCommandSourceStack(), "kill @e[tag=pyridium_test]"));
+                } else if (lifecycleStage == 1 && elapsed >= 40000) {
+                    lifecycleStage = 2;
+                    server.execute(() -> server.getCommands().performPrefixedCommand(server.createCommandSourceStack(),
+                        "summon minecraft:pig 1001 180 1005 {NoAI:1b,NoGravity:1b,PersistenceRequired:1b,Tags:[\"pyridium_test\"]}"));
+                }
+            }
+            return;
+        }
         installed = true;
+        installedAt = System.currentTimeMillis();
         var server = mc.getSingleplayerServer();
         server.execute(() -> {
             var source = server.createCommandSourceStack();
