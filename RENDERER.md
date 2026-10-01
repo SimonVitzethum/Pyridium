@@ -234,3 +234,26 @@ eigener FPS-Deckel wird bei Bedarf auf mindestens dieses Ziel angehoben
 adaptive Auflösung und wählt ausdrücklich 100 % interne Renderauflösung; auch
 nach einem Moduswechsel bleibt dies erhalten. Höhere bereits eingestellte
 Minecraft-Limits bleiben erhalten.
+
+Fensterloser Lichtvergleich vom 01.10.2026, RTX 5070 Laptop, Bare Bones PBR,
+1920×1080 **auch intern**, 1024-Chunk-Radius, RR, `targetFps=0`, Duty 1:
+
+| Licht | FPS-Mittel | Bereich | GPU-Zeit pro Bild |
+| --- | ---: | ---: | ---: |
+| Normales GI/Path Tracing + Szenenreflexionen | 17,6 | 16,9–18,2 | ca. 47,5 ms |
+| `PYRIDIUM_TEST_LIGHTING=direct` | 18,9 | 18,2–19,8 | ca. 42,8 ms |
+
+Mittel aus den letzten sechs 5-Sekunden-FPS-Fenstern je Lauf, nach dem
+LOD-Aufbau (beide rund 34.690 sichtbar / 43.905 resident / 0 offen).
+Ein Lauf je Variante, keine statistische Benchmark-Serie. Die Direktvariante
+behält RT-Schatten, Wasserbrechung, PBR, Nebel und DLSS RR; sie ist kein
+Raster- oder komplett raytracingfreier Modus. Ohne GI fällt der separate
+GI-Durchgang weg, allerdings wandert die direkte Himmelslicht-Abtastung ins
+Bild-Shading. Deshalb lassen sich die vorher gemessenen GI-Millisekunden
+nicht einfach vom Frame abziehen: die Hochrechnung von etwa 22 FPS wurde
+in diesem Vergleich **nicht** erreicht. Quellspielstand und Spieleroptionen
+blieben unverändert, beide Integrationstests bestanden.
+
+Protokolle und native HD-Aufnahmen dieses Vergleichs:
+`/tmp/pyridium-render-check.vQ5QLm` (normal) und
+`/tmp/pyridium-render-check.G9EBR5` (direkt).
