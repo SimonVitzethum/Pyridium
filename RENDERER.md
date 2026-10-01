@@ -19,6 +19,44 @@ es ist kein zusätzlicher Strahlverfolger. Die Beleuchtung ist weiterhin eine
 Kombination direkter Strahlen, separater GI und Reflexionen, kein vollständig
 vereinheitlichter physikalischer Path Tracer.
 
+## Renderer-Schalter
+
+Grafikeinstellungen → **Pyridium · CUDA** bietet unabhängig gespeicherte
+Schalter für **Ray Reconstruction**, **Path Tracing / indirektes Licht**,
+**Raytracing-Effekte** und **RT-Cores (OptiX)**. Alle sind standardmäßig an;
+der bisherige Spectator-Schalter bleibt erhalten. Die gemeinsame Datei ist
+`config/pyridium-renderer.properties`; unbekannte Eigenschaften bleiben erhalten.
+
+- RR aus: statt DLSS RR native CUDA-Nachbearbeitung. Explizite JVM-Modi
+  `native`, `taau`, `dlaa` und `dlss` werden nicht durch den RR-Schalter ersetzt.
+- Path Tracing aus: kein GI-/AO-Strahl und kein separater GI-Durchgang.
+- Raytracing-Effekte aus: keine strahlbasierten direkten Schatten,
+  Szenenreflexionen, Wasser-/Glasbrechung oder zusätzlichen Coverage-Strahlen.
+  Wasser und Glas werden zu einfachen sichtbaren Oberflächen. Direkte
+  PBR-Beleuchtung, Texturen und prozeduraler Himmel bleiben erhalten.
+- RT-Cores aus: der Kontext wird ohne OptiX neu angelegt und benutzt den
+  bestehenden CUDA-Software-Tracer. Dabei werden Welt-/Material-/Entity-Caches
+  neu aufgebaut. Dieser Fallback prüft Szeneninstanzen linear, hat noch keine
+  eigene CUDA-Szenen-BVH und ist bei großer Sichtweite erheblich langsamer.
+
+Die primäre HashDAG-Sichtbarkeitsprüfung bleibt auch mit allen Schaltern aus
+eine Strahlsuche; es gibt keinen heimlich zugeschalteten Rasterpfad.
+Wer zusätzliche Lichtstrahlen abschalten und schneller rendern will, kann
+die ersten drei Schalter ausschalten und die RT-Cores für Sichtbarkeit behalten.
+Licht-/RR-Wechsel verwerfen temporale Bild- und GI-Verläufe. Die erstmalige
+RR-Initialisierung ist auch nach einem Start ohne RR auf einem ausreichend
+großen nativen Thread-Stack geschützt; native Fallbacks werden nicht jedes
+Frame erneut durch die Java-Einstellung überschrieben.
+
+Für isolierte Tests überschreiben `pyridium.rayReconstruction`,
+`pyridium.rayEffects`, `pyridium.pathTracing`, `pyridium.hardwareRaytracing`
+die gespeicherten Werte (`true`/`false`). `tools/check_renderer.sh` akzeptiert
+entsprechend `PYRIDIUM_TEST_RR`, `PYRIDIUM_TEST_RAY_EFFECTS`,
+`PYRIDIUM_TEST_PATH_TRACING`, `PYRIDIUM_TEST_HARDWARE_RT`.
+`PYRIDIUM_TEST_TOGGLES=1` mit `PYRIDIUM_TEST_SECONDS=160` prüft laufende
+Wechsel einschließlich Kontext-Neuaufbau und persistenter Einstellungen,
+ausschließlich im wegwerfbaren Testverzeichnis.
+
 ## Blocktexturen
 
 Pyridium benutzt die echten gebackenen Minecraft-Blocktexturen, nicht die
@@ -306,3 +344,47 @@ und 0 offene Aufträge. Beide Minecraft-Integrationstests bestanden; native
 HD-Aufnahmen wurden visuell geprüft. Quellspielstand und Optionen blieben
 unverändert. Logs und PNGs: `/tmp/pyridium-render-check.wzQANe` (Baseline),
 `/tmp/pyridium-render-check.4Hek7v` (gezielter RT-Pfad).
+
+### Abschaltvergleich vom 01.10.2026
+
+Fensterlos auf der RTX 5070 Laptop, Bare Bones PBR, intern und Ausgabe
+1920×1080, 1024-Chunk-Radius, `targetFps=0`, Duty 1:
+
+| Einstellung | Tatsächliche FPS | Einordnung |
+| --- | ---: | --- |
+| RR, GI/Path Tracing und Raytracing-Effekte aus; RT-Cores an | 29,6 Mittel, 28,7–30,1 | letzte sechs 5-s-Fenster, LOD fertig |
+| zusätzlich RT-Cores aus | 1,2 Mittel, 1,1–1,3 | letzte sechs Fenster **während LOD-Aufbau**, nicht gleichwertiger Vollweltvergleich |
+
+Der erste Lauf meldete 34.686 sichtbare / 43.904 residente LOD-Einträge und
+0 offene Aufträge. Seine GPU-Zeit lag zuletzt bei ca. 16,3–16,6 ms, inklusive
+direkter PBR-Schattierung, primärer RT-Sichtbarkeit und CUDA-Nachbearbeitung.
+Der Kehrwert dieser GPU-Zeit (ca. 60 FPS) ist **nicht** die gemessene
+Minecraft-Bildrate. Die tatsächlichen FPS beinhalten übrigen Frame-Aufwand.
+Ein Einzelvergleich gegen die vorherige vollständige Beleuchtung/RR
+(ca. 17–18 FPS) ist keine statistische Benchmark-Serie.
+
+Der Software-Lauf endete bereits bei rund 8.945 sichtbaren / 12.102 residenten
+Einträgen und 97.000 offenen Aufträgen. Seine Zahl darf nicht als FPS einer
+fertig geladenen 1024-Chunk-Welt ausgegeben werden. Er zeigt, dass das
+Entfernen der Hardware-Sichtbarkeitsbeschleunigung beim aktuellen linearen
+Fallback keine Performance-Optimierung ist. Kein Lauf beweist 165 FPS oder
+vollständige Vanilla-GPU-Worldgen. Beide isolierten Integrationstests bestanden;
+native Full-HD-Bilder wurden auf sichtbare Welt, Minecraft-/PBR-Materialien,
+Entities und die abgeschalteten Effekte geprüft.
+
+Protokolle und Aufnahmen: `/tmp/pyridium-render-check.acT1Rq` (nur primäre
+Hardware-Sichtbarkeit), `/tmp/pyridium-render-check.VnRijE` (CUDA-Fallback).
+`zig build test --summary all`: 62/62 Tests bestanden, einschließlich
+Lichtschalter-Kombinationen und genau eines Sichtstrahls je Pixel auch vor
+transparentem Glas, mit Coverage- und Nebeleinstellungen. `zig build
+kernel-check --release=fast --summary all` bestand ebenfalls.
+
+Der zusätzliche Einstellungs-Lifecycle-Test bestand ebenfalls:
+`/tmp/pyridium-render-check.qIcUK1`. Er startete ohne RR, öffnete die echten
+Grafikeinstellungen fensterlos, speicherte alle Schalter in seiner isolierten
+Konfiguration, wechselte Licht und RR sowie RT-Cores aus/an und renderte
+anschließend wieder mit RR, GI und Hardware-Beschleunigung. Der Abschluss
+meldete 34.686 sichtbar / 43.904 resident / 0 offen; die Full-HD-Aufnahme
+zeigt wieder beleuchtete Entities und Szenenreflexionen. Quellspielstand,
+Spieleroptionen und echte Renderer-Konfiguration wurden nicht geändert.
+`./gradlew build -x compileCuda` lieferte die aktualisierte Mod-JAR erfolgreich.

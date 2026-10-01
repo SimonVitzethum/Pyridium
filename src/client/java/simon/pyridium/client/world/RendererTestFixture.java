@@ -9,6 +9,9 @@ public final class RendererTestFixture {
     private static int lifecycleStage;
     private static int spectatorStage;
     private static int settingsStage;
+    // Survive native context rebuilds during this explicit one-shot test.
+    private static int featureStage;
+    private static long featureTestStart;
     private RendererTestFixture() {}
     public static void reset() { installed = false; installedAt = 0; lifecycleStage = 0; spectatorStage = 0; settingsStage = 0; }
 
@@ -17,6 +20,43 @@ public final class RendererTestFixture {
             mc.level == null || mc.player == null || mc.getSingleplayerServer() == null || !PyritWorld.isReady()) return;
         if (installed) {
             long elapsed = System.currentTimeMillis() - installedAt;
+            if (Boolean.getBoolean("pyridium.testRendererToggles")) {
+                if (featureTestStart == 0) {
+                    featureTestStart = installedAt;
+                    // Persist only in the disposable test run directory, then exercise
+                    // the same settings API used by the actual GUI callbacks.
+                    for (var feature : RendererSettings.Feature.values())
+                        RendererSettings.enabled(feature, RendererSettings.enabled(feature));
+                    for (String key : new String[]{"rayReconstruction", "rayEffects", "pathTracing", "hardwareRaytracing"})
+                        System.clearProperty("pyridium." + key);
+                }
+                long featureElapsed = System.currentTimeMillis() - featureTestStart;
+                if (featureStage == 0 && featureElapsed >= 20000) {
+                    featureStage = 1; RendererSettings.enabled(RendererSettings.Feature.RAY_RECONSTRUCTION, false);
+                } else if (featureStage == 1 && featureElapsed >= 35000) {
+                    featureStage = 2; RendererSettings.enabled(RendererSettings.Feature.PATH_TRACING, false);
+                } else if (featureStage == 2 && featureElapsed >= 50000) {
+                    featureStage = 3; RendererSettings.enabled(RendererSettings.Feature.RAY_EFFECTS, false);
+                } else if (featureStage == 3 && featureElapsed >= 65000) {
+                    featureStage = 4;
+                    RendererSettings.enabled(RendererSettings.Feature.RAY_RECONSTRUCTION, true);
+                    RendererSettings.enabled(RendererSettings.Feature.PATH_TRACING, true);
+                    RendererSettings.enabled(RendererSettings.Feature.RAY_EFFECTS, true);
+                } else if (featureStage == 4 && featureElapsed >= 80000) {
+                    featureStage = 5;
+                    RendererSettings.enabled(RendererSettings.Feature.RAY_RECONSTRUCTION, false);
+                    RendererSettings.enabled(RendererSettings.Feature.PATH_TRACING, false);
+                    RendererSettings.enabled(RendererSettings.Feature.RAY_EFFECTS, false);
+                    RendererSettings.enabled(RendererSettings.Feature.HARDWARE_RT, false);
+                } else if (featureStage == 5 && featureElapsed >= 100000) {
+                    featureStage = 6;
+                    RendererSettings.enabled(RendererSettings.Feature.RAY_RECONSTRUCTION, true);
+                    RendererSettings.enabled(RendererSettings.Feature.PATH_TRACING, true);
+                    RendererSettings.enabled(RendererSettings.Feature.RAY_EFFECTS, true);
+                    RendererSettings.enabled(RendererSettings.Feature.HARDWARE_RT, true);
+                    org.slf4j.LoggerFactory.getLogger("RendererTestFixture").info("Pyridium: Renderer-Schalter wiederhergestellt");
+                }
+            }
             if (Boolean.getBoolean("pyridium.testVideoSettings")) {
                 if (settingsStage == 0 && elapsed >= 12000) {
                     settingsStage = 1;

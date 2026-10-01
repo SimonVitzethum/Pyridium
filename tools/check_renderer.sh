@@ -6,6 +6,11 @@ case "${PYRIDIUM_TEST_LIGHTING:-path}" in
     path|direct) ;;
     *) echo "PYRIDIUM_TEST_LIGHTING must be path or direct" >&2; exit 2 ;;
 esac
+for feature in RR RAY_EFFECTS PATH_TRACING HARDWARE_RT; do
+    variable="PYRIDIUM_TEST_$feature"
+    value="${!variable:-true}"
+    case "$value" in true|false) ;; *) echo "$variable must be true or false" >&2; exit 2 ;; esac
+done
 
 project_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 if [[ $# != 1 ]]; then
@@ -32,9 +37,12 @@ if [[ -n "${PYRIDIUM_TEST_PACK:-}" ]]; then
     sed -i 's/^resourcePacks:.*/resourcePacks:["vanilla","file\/Pyridium-PBR-Test.zip"]/' "$test_dir/options.txt"
 fi
 echo "Disposable test world and native Full-HD captures: $test_dir"
-extra_jvm=""
+extra_jvm="-Dpyridium.rayReconstruction=${PYRIDIUM_TEST_RR:-true} -Dpyridium.rayEffects=${PYRIDIUM_TEST_RAY_EFFECTS:-true} -Dpyridium.pathTracing=${PYRIDIUM_TEST_PATH_TRACING:-true} -Dpyridium.hardwareRaytracing=${PYRIDIUM_TEST_HARDWARE_RT:-true}"
+if [[ "${PYRIDIUM_TEST_TOGGLES:-0}" == 1 ]]; then
+    extra_jvm="$extra_jvm -Dpyridium.testRendererToggles=true -Dpyridium.testVideoSettings=true"
+fi
 if [[ "${PYRIDIUM_TEST_SPECTATOR:-0}" == 1 ]]; then
-    extra_jvm="-Dpyridium.testSpectator=true -Dpyridium.testVideoSettings=true"
+    extra_jvm="$extra_jvm -Dpyridium.testSpectator=true -Dpyridium.testVideoSettings=true"
     if [[ "${PYRIDIUM_TEST_SPECTATOR_PREBUILD:-1}" == 1 ]]; then
         extra_jvm="$extra_jvm -Dpyridium.spectatorCache=true"
     fi
@@ -43,10 +51,36 @@ cd -- "$project_dir"
 SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy \
 PYRIDIUM_TEST_GPU_DUTY="${PYRIDIUM_TEST_GPU_DUTY:-1}" \
 ./gradlew runClient -PpydRunDir="$test_dir" -PquickWorld=RenderTest -PpydSize=1920x1080 \
-    "-PpydJvm=-Dpyridium.headless=true -Dpyridium.noPrefetch=true -Dpyridium.gpuWorldgen=false -Dpyridium.mode=rr -Dpyridium.viewChunks=1024 -Dpyridium.autoQuit=90 -Dpyridium.testTimeout=240 -Dpyridium.shotDir=$test_dir/shots -Dpyridium.shotEvery=15000 -Dpyridium.targetFps=0 -Dpyridium.testEntities=true -Dpyridium.testEntityFeatures=true -Dpyridium.testMaterials=true $extra_jvm" \
+    "-PpydJvm=-Dpyridium.headless=true -Dpyridium.noPrefetch=true -Dpyridium.gpuWorldgen=false -Dpyridium.mode=rr -Dpyridium.viewChunks=1024 -Dpyridium.autoQuit=${PYRIDIUM_TEST_SECONDS:-90} -Dpyridium.testTimeout=${PYRIDIUM_TEST_TIMEOUT:-240} -Dpyridium.shotDir=$test_dir/shots -Dpyridium.shotEvery=15000 -Dpyridium.targetFps=0 -Dpyridium.testEntities=true -Dpyridium.testEntityFeatures=true -Dpyridium.testMaterials=true $extra_jvm" \
     -x compileCuda 2>&1 | tee "$test_dir/native.log"
 
 test_log="$test_dir/logs/latest.log"
+if [[ "${PYRIDIUM_TEST_TOGGLES:-0}" == 1 ]]; then
+    for expected in 'RR false, GI true, RT-Effekte true, RT-Cores true' \
+                    'RR false, GI false, RT-Effekte true, RT-Cores true' \
+                    'RR false, GI false, RT-Effekte false, RT-Cores true' \
+                    'RR false, GI false, RT-Effekte false, RT-Cores false'; do
+        if ! rg -q "Renderer-Features: $expected" "$test_dir/native.log"; then
+            echo "FAIL: live renderer transition missing: $expected" >&2; exit 1
+        fi
+    done
+    if ! rg -q 'Renderer-Schalter wiederhergestellt' "$test_log" ||
+       ! rg -q 'Grafikeinstellungen fensterlos geoeffnet' "$test_log"; then
+        echo "FAIL: renderer settings lifecycle did not finish" >&2; exit 1
+    fi
+    for key in rayReconstruction rayEffects pathTracing hardwareRaytracing; do
+        if ! rg -q "^$key=true$" "$test_dir/config/pyridium-renderer.properties"; then
+            echo "FAIL: renderer setting $key was not persisted" >&2; exit 1
+        fi
+    done
+fi
+if ! rg -q "Renderer-Features: RR ${PYRIDIUM_TEST_RR:-true}, .*RT-Effekte ${PYRIDIUM_TEST_RAY_EFFECTS:-true}, RT-Cores ${PYRIDIUM_TEST_HARDWARE_RT:-true}" "$test_dir/native.log"; then
+    echo "FAIL: requested reconstruction/effect/backend switches were not applied" >&2; exit 1
+fi
+if [[ "${PYRIDIUM_TEST_PATH_TRACING:-true}" == false ]] &&
+   ! rg -q 'Renderer-Features: .*GI false' "$test_dir/native.log"; then
+    echo "FAIL: GI was not disabled" >&2; exit 1
+fi
 if [[ "${PYRIDIUM_TEST_LIGHTING:-path}" == direct ]] &&
    ! rg -q 'Test-Licht: direct, .*GI false, Szenenreflexionen false, RT-Schatten true' "$test_dir/native.log"; then
     echo "FAIL: direct-lighting comparison preset was not applied" >&2
