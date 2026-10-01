@@ -71,7 +71,7 @@ pub inline fn attributeAt(g: *const Dag, attrs: [*]const u32, rank: u32) u32 {
     return attrs[r];
 }
 
-fn attributeRank(g: *const Dag, stk: *const [max_log2 + 1]u32, v: [3]u32, brick: u64) u32 {
+fn attributeRank(g: *const Dag, stk: []const u32, v: [3]u32, brick: u64) u32 {
     var rank: u32 = 0;
     var s: u32 = g.log2_size - 1;
     while (s >= 2) : (s -= 1) {
@@ -107,7 +107,7 @@ inline fn exitAt(t: f32, axis: u32, oct: u32) DagHit {
 ///
 /// Achsen werden mit `inline for` behandelt, damit alles in Registern bleibt.
 pub fn trace(g: *const Dag, o: Vec3, d: Vec3, tmin: f32, tmax: f32, want_attribute: bool) ?DagHit {
-    return walk(false, g, o, d, tmin, tmax, want_attribute, null, .{});
+    return walk(false, max_log2, g, o, d, tmin, tmax, want_attribute, null, .{});
 }
 
 /// Wie `trace`, überspringt aber Voxel, deren Material in `skip` steht (ein Bit
@@ -117,7 +117,17 @@ pub fn trace(g: *const Dag, o: Vec3, d: Vec3, tmin: f32, tmax: f32, want_attribu
 /// `base`: Ursprung dieses DAGs in einem größeren (Teilbäume der RT-Cores),
 /// damit das Lochmuster auf beiden Wegen an denselben Voxeln sitzt.
 pub fn traceSkipping(g: *const Dag, o: Vec3, d: Vec3, tmin: f32, tmax: f32, want_attribute: bool, skip: ?*const types.MaterialMask, cut: ?*const types.MaterialMask, base: [3]i32) ?DagHit {
-    return walk(false, g, o, d, tmin, tmax, want_attribute, skip, .{ .cut = cut, .base = base, .attribute_format = g.attribute_format, .scene = g.cut_scene });
+    return walk(false, max_log2, g, o, d, tmin, tmax, want_attribute, skip, .{ .cut = cut, .base = base, .attribute_format = g.attribute_format, .scene = g.cut_scene });
+}
+
+/// Constant-depth 8^3 subtree for OptiX custom intersections. Keep this
+/// specialization out of CUDA shading/medium-exit code: duplicating the walk
+/// there increases register spills in the already large shading kernel.
+/// The caller must provide a DAG whose log2_size is min_log2.
+pub fn traceBrickTree(g: *const Dag, o: Vec3, d: Vec3, tmin: f32, tmax: f32, want_attribute: bool, skip: ?*const types.MaterialMask, cut: ?*const types.MaterialMask, base: [3]i32) ?DagHit {
+    var small = g.*;
+    small.log2_size = min_log2;
+    return walk(false, min_log2, &small, o, d, tmin, tmax, want_attribute, skip, .{ .cut = cut, .base = base, .attribute_format = g.attribute_format, .scene = g.cut_scene });
 }
 
 pub const Cut = struct { cut: ?*const types.MaterialMask = null, base: [3]i32 = .{ 0, 0, 0 }, attribute_format: u32 = types.attribute_legacy, scene: ?*const types.Scene = null };
@@ -128,7 +138,7 @@ pub const Cut = struct { cut: ?*const types.MaterialMask = null, base: [3]i32 = 
 /// Leeren, ist das Ergebnis t = tmin. null, wenn der Strahl bis tmax im
 /// Material bleibt; Verlassen des Würfels zählt als Austritt.
 pub fn traceExit(g: *const Dag, o: Vec3, d: Vec3, tmin: f32, tmax: f32) ?DagHit {
-    return walk(true, g, o, d, tmin, tmax, false, null, .{});
+    return walk(true, max_log2, g, o, d, tmin, tmax, false, null, .{});
 }
 
 /// Zellen je Voxelkante im Lochmuster (siehe material_cutout)
@@ -171,7 +181,7 @@ inline fn skipped(skip: ?*const types.MaterialMask, format: u32, attribute: u32)
     return (m[idx >> 6] >> @intCast(idx & 63)) & 1 != 0;
 }
 
-fn walk(comptime exit_mode: bool, g: *const Dag, o: Vec3, d: Vec3, tmin: f32, tmax: f32, want_attribute: bool, skip: ?*const types.MaterialMask, cut: Cut) ?DagHit {
+fn walk(comptime exit_mode: bool, comptime depth_bound: u32, g: *const Dag, o: Vec3, d: Vec3, tmin: f32, tmax: f32, want_attribute: bool, skip: ?*const types.MaterialMask, cut: Cut) ?DagHit {
     const n: u32 = @as(u32, 1) << @intCast(g.log2_size);
     const nf: f32 = @floatFromInt(n);
 
@@ -217,7 +227,7 @@ fn walk(comptime exit_mode: bool, g: *const Dag, o: Vec3, d: Vec3, tmin: f32, tm
         cell[a] = @as(u32, @intFromFloat(p)) & ~((@as(u32, 1) << @intCast(scale)) - 1);
     }
 
-    var stk: [max_log2 + 1]u32 = undefined;
+    var stk: [depth_bound + 1]u32 = undefined;
     stk[scale] = g.root;
     var brick: u64 = 0;
 

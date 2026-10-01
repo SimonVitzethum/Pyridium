@@ -41,8 +41,11 @@ pub fn traceSubtree(g: *const types.RtGeometry, prim: types.RtPrim, o: Vec3, d: 
         .log2_size = g.rt_log2,
         .default_attribute = g.default_attribute,
     };
-    const hit = if (skip != null or cut != null)
-        dag.traceSkipping(&sub, o - origin, d, tmin, tmax, want_attribute, skip, cut, .{ @intCast(base[0]), @intCast(base[1]), @intCast(base[2]) })
+    const base_i = [3]i32{ @intCast(base[0]), @intCast(base[1]), @intCast(base[2]) };
+    const hit = if (g.rt_log2 == dag.min_log2)
+        dag.traceBrickTree(&sub, o - origin, d, tmin, tmax, want_attribute, skip, cut, base_i)
+    else if (skip != null or cut != null)
+        dag.traceSkipping(&sub, o - origin, d, tmin, tmax, want_attribute, skip, cut, base_i)
     else
         dag.trace(&sub, o - origin, d, tmin, tmax, want_attribute);
     var h = hit orelse return null;
