@@ -360,6 +360,24 @@ export fn pyd_world_create(seed: u64, mode: u32) i32 {
     // Edge-aware temporal reconstruction reduces GI work, retaining full
     // resolution for primary hits, textures and direct shadows.
     S.light.flags |= types.lighting_gi_half;
+    // Diagnostic comparison only; defaults and player settings stay unchanged.
+    // Direct lighting retains PBR, shadow/refraction rays and atmospheric fog,
+    // but launches no diffuse bounce/GI or scene-reflection rays.
+    if (std.c.getenv("PYRIDIUM_TEST_LIGHTING")) |value| {
+        const preset = std.mem.span(value);
+        if (std.mem.eql(u8, preset, "direct")) {
+            S.light.flags &= ~(types.lighting_gi | types.lighting_gi_half |
+                types.lighting_ao | types.lighting_reflections);
+        } else if (!std.mem.eql(u8, preset, "path")) {
+            root.setError("Unbekanntes Test-Licht: {s} (path/direct)", .{preset});
+            return -1;
+        }
+        std.debug.print("[pyridium] Test-Licht: {s}, Flags 0x{x}; GI {any}, Szenenreflexionen {any}, RT-Schatten {any}\n", .{
+            preset,                                      S.light.flags,
+            S.light.flags & types.lighting_gi != 0,      S.light.flags & types.lighting_reflections != 0,
+            S.light.flags & types.lighting_shadows != 0,
+        });
+    }
     if (!req(pyrit.pyr_set_lighting(@ptrCast(S.ctx), &S.light), "Licht")) return -1;
     if (!req(pyrit.pyr_view_create(@ptrCast(S.ctx), &S.view), "Ansicht")) return -1;
     S.post = scene.post();

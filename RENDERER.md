@@ -178,6 +178,12 @@ damit der Java-Flächenpuffer nicht während einer offenen Kopie freigegeben wir
   Der Quellspielstand soll geschlossen sein, damit die Kopie konsistent ist.
   `PYRIDIUM_TEST_PACK='/home/simon/Downloads/Bare Bones PBR.zip'` prüft zusätzlich
   den Pack in einer temporären Kopie, ohne Spielereinstellungen zu verändern.
+  `PYRIDIUM_TEST_LIGHTING=path` protokolliert die normale GI-/Reflexions-
+  Baseline; `PYRIDIUM_TEST_LIGHTING=direct` deaktiviert GI einschließlich
+  Halbauflösungs-Durchgang, AO-Strahlen und Szenenreflexionen nur für den Test.
+  PBR, direkte Raytracing-Schatten, Wasserbrechung, Himmel/Nebel und RR bleiben
+  unverändert aktiv. Das ist **kein Raytracing-freier Rastermodus**. Ohne die
+  Testvariable bleiben Spieler-Einstellungen und normales Licht unverändert.
   `PYRIDIUM_TEST_SPECTATOR=1` prüft zusätzlich Vorbau und Spectator-Höhlenkamera;
   `PYRIDIUM_TEST_SPECTATOR_PREBUILD=0` prüft stattdessen Aufbau erst bei Bedarf.
   Beide Varianten verlassen anschließend Spectator und deaktivieren den

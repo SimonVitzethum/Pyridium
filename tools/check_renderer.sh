@@ -2,6 +2,11 @@
 # Disposable, windowless Full-HD renderer test. The source save is never opened.
 set -euo pipefail
 
+case "${PYRIDIUM_TEST_LIGHTING:-path}" in
+    path|direct) ;;
+    *) echo "PYRIDIUM_TEST_LIGHTING must be path or direct" >&2; exit 2 ;;
+esac
+
 project_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 if [[ $# != 1 ]]; then
     echo "Usage: bash tools/check_renderer.sh <Minecraft save directory>" >&2
@@ -42,6 +47,11 @@ PYRIDIUM_TEST_GPU_DUTY="${PYRIDIUM_TEST_GPU_DUTY:-1}" \
     -x compileCuda 2>&1 | tee "$test_dir/native.log"
 
 test_log="$test_dir/logs/latest.log"
+if [[ "${PYRIDIUM_TEST_LIGHTING:-path}" == direct ]] &&
+   ! rg -q 'Test-Licht: direct, .*GI false, Szenenreflexionen false, RT-Schatten true' "$test_dir/native.log"; then
+    echo "FAIL: direct-lighting comparison preset was not applied" >&2
+    exit 1
+fi
 if ! rg -q 'Aufnahme .*\(1920x1080, Frame' "$test_log"; then
     echo "FAIL: no native Full-HD capture recorded" >&2
     exit 1
