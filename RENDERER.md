@@ -5,6 +5,20 @@ Vulkan ist ausschließlich in Pyrits DLSS-FG-Interop vorgesehen. **DLSS FG ist
 noch nicht mit der Pyridium-Ausgabe verbunden.** Das Produktionsziel bleibt
 165 FPS bei 1024 Chunks Sichtweite; dieses Ergebnis ist noch nicht nachgewiesen.
 
+Die Beleuchtung wird nicht zweimal als „RT plus PT“ gerendert: direkte
+Beleuchtung, diffuse Lichtpfade und Reflexionen teilen den CUDA/OptiX-Tracer.
+OptiX nutzt die RT-Cores für die Hardware-BVH; genaue HashDAG-Treffer und
+Laub-Alpha-Prüfungen bleiben eigene GPU-Schnittprogramme. Die Welt verwendet
+bereits 8³-Teilbaum-Boxen, die kleinste unterstützte DAG-Primitivgröße.
+Dieser häufige Schnittpfad hat jetzt eine konstante Tiefe mit kleinem Stack.
+Größere Geometrien verwenden weiterhin denselben generischen DAG-Walker.
+Die Spezialisierung bleibt aus dem großen CUDA-Shading-/Medien-Austrittscode
+heraus, weil zusätzliche Varianten dort Register-Spills erhöhen.
+DLSS Ray Reconstruction rekonstruiert anschließend das verrauschte Ergebnis;
+es ist kein zusätzlicher Strahlverfolger. Die Beleuchtung ist weiterhin eine
+Kombination direkter Strahlen, separater GI und Reflexionen, kein vollständig
+vereinheitlichter physikalischer Path Tracer.
+
 ## Blocktexturen
 
 Pyridium benutzt die echten gebackenen Minecraft-Blocktexturen, nicht die
@@ -152,7 +166,7 @@ vor der Rückgabe auf seine Ergebnisse. Auch frühe Fehler warten vor Rückgabe,
 damit der Java-Flächenpuffer nicht während einer offenen Kopie freigegeben wird.
 
 - `./gradlew compileClientJava`, `bash tools/check_block_faces.sh` und
-  `zig build test` in `native/pyrit` (59 Tests einschließlich PBR, Alpha,
+  `zig build test` in `native/pyrit` (60 Tests einschließlich PBR, Alpha,
   Spectator-Strahlen, Speichergruppen, VRAM-Policy und Replay-Ausgabe).
 - `bash tools/check_shader_batches.sh` prüft gemischte Punkt-/Volumen-Kernels
   in einem Modul, getrennte Bindungen, erneutes Binden und mehrfache Freigabe
@@ -257,3 +271,38 @@ blieben unverändert, beide Integrationstests bestanden.
 Protokolle und native HD-Aufnahmen dieses Vergleichs:
 `/tmp/pyridium-render-check.vQ5QLm` (normal) und
 `/tmp/pyridium-render-check.G9EBR5` (direkt).
+
+### Gezielte RT-Optimierung vom 01.10.2026
+
+Der konstante 8³-Schnittpfad ist nur im OptiX-Teilbaum-Tracer aktiviert.
+CPU-Referenzen vergleichen ihn mit dem generischen Walker einschließlich
+Palette, nicht-null Attributbasis, Material16-Überspringen, Innenstart,
+nicht normierten Richtungen und begrenzter Strahllänge. Der bestehende
+Laubtest prüft weiterhin echte Textur-Alpha-Masken auf beiden Wegen.
+`zig build test kernel-check --release=fast --summary all` bestand mit
+60/60 Tests; auch die GPU-Referenztests des Spezialisierungsversuchs bestanden.
+
+Ein wiederholtes PBR-Surface-Caching innerhalb der Replay-Kacheln wurde
+implementiert und getestet, aber **nicht übernommen**: der zusätzliche
+Cache-/Shader-Aufwand lieferte keinen überzeugenden Gesamtgewinn. Ebenso
+wurde die Variante verworfen, die den kleinen Walker zusätzlich in den großen
+CUDA-Shading-Kernel einbettet; sie erhöhte Register-Spills. Der ausgelieferte
+Pfad behält deshalb die bisherige Schattierung, Samples und RR unverändert.
+
+Fensterlos, RTX 5070 Laptop, Bare Bones PBR, intern und Ausgabe 1920×1080,
+1024-Chunk-Radius, GI/Reflexionen/RR aktiv, Duty 1 und `targetFps=0`:
+
+| Messung nach LOD-Aufbau | Frische Baseline | Gezielter RT-Pfad |
+| --- | ---: | ---: |
+| Bild-RT | ca. 14,3 ms | ca. 13,3 ms |
+| GI-RT | ca. 3,9 ms | ca. 3,6 ms |
+| Gesamte GPU-Zeit | ca. 47,5 ms | ca. 46,6–47,0 ms |
+| Letzte sechs FPS-Fenster | 17,5 FPS | 17,7 FPS |
+
+Das sind Einzelvergleiche, keine statistische FPS-Serie: ein kleiner GPU-
+Gewinn, **kein belastbarer großer FPS-Sprung und kein 165-FPS-Nachweis**.
+Der Abschlusslauf meldete 34.691 sichtbare / 43.909 residente LOD-Einträge
+und 0 offene Aufträge. Beide Minecraft-Integrationstests bestanden; native
+HD-Aufnahmen wurden visuell geprüft. Quellspielstand und Optionen blieben
+unverändert. Logs und PNGs: `/tmp/pyridium-render-check.wzQANe` (Baseline),
+`/tmp/pyridium-render-check.4Hek7v` (gezielter RT-Pfad).

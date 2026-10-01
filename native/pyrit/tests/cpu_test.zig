@@ -12,6 +12,53 @@ const testing = std.testing;
 const gpa = testing.allocator;
 const print = std.debug.print;
 
+test "brick-tree RT specialization preserves palette rank, skips and non-unit rays" {
+    const points = [_]pyrit.dag_builder.Point{
+        .{ .x = 1, .y = 1, .z = 1, .attribute = 1 },
+        .{ .x = 3, .y = 1, .z = 1, .attribute = 2 },
+    };
+    var built = try pyrit.dag_builder.buildPoints(gpa, 3, &points, true);
+    defer built.deinit(gpa);
+    const palette = [_]u32{ types.packMaterial16(1025, 0xffffff), types.packMaterial16(7, 0xff0000) };
+    const packed_attrs = [_]u32{1 << 16}; // ranks 3 and 4, palette indices 0 and 1
+    var skip = std.mem.zeroes(types.MaterialMask);
+    skip[1025 / 64] = @as(u64, 1) << (1025 % 64);
+    const dag = pyr.dag.Dag{
+        .nodes = built.nodes.ptr,
+        .leaves = built.leaves.ptr,
+        .attributes = &packed_attrs,
+        .palette = &palette,
+        .attr_base = 3,
+        .root = built.root,
+        .log2_size = 3,
+        .default_attribute = 0,
+        .attribute_format = types.attribute_material16,
+    };
+    const rg = types.RtGeometry{
+        .nodes = @intFromPtr(built.nodes.ptr),
+        .leaves = @intFromPtr(built.leaves.ptr),
+        .attributes = @intFromPtr(&packed_attrs),
+        .palette = @intFromPtr(&palette),
+        .prims = 0,
+        .rt_log2 = 3,
+        .default_attribute = 0,
+    };
+    const prim = types.RtPrim{ .node = built.root, .attr_base = 3, .cell = 0 };
+    const origins = [_]vec.Vec3{ .{ -1, 1.5, 1.5 }, .{ 9, 1.5, 1.5 }, .{ 1.5, 1.5, 1.5 }, .{ -1, 0.5, 0.5 } };
+    const directions = [_]vec.Vec3{ .{ 1, 0, 0 }, .{ -2, 0, 0 }, .{ 1, 0, 0 }, .{ 1, 0, 0 } };
+    for (origins, directions) |o, d| {
+        for ([_]bool{ false, true }) |want_attribute| {
+            for ([_]f32{ 1, 100 }) |tmax| {
+                const reference = pyr.dag.traceSkipping(&dag, o, d, 0, tmax, want_attribute, &skip, null, .{ 0, 0, 0 });
+                const actual = pyr.rt.traceSubtree(&rg, prim, o, d, 0, tmax, want_attribute, &skip, null, types.attribute_material16, null);
+                if (!std.meta.eql(reference, actual)) print("brick-tree o={any} d={any} attributes={} tmax={d}: reference={any}, actual={any}\n", .{ o, d, want_attribute, tmax, reference, actual });
+                try testing.expectEqualDeep(reference, actual);
+            }
+        }
+    }
+    try testing.expectEqual(palette[1], pyr.rt.traceSubtree(&rg, prim, origins[0], directions[0], 0, 100, true, &skip, null, types.attribute_material16, null).?.attribute);
+}
+
 test "replay writes only resolved/final output and diagnostics are opt-in" {
     var scene = std.mem.zeroes(types.Scene);
     var empty_instance = std.mem.zeroes(types.InstanceData);
