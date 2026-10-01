@@ -20,8 +20,10 @@ public abstract class VideoSettingsScreenMixin extends OptionsSubScreen {
     private void pyridium$options(CallbackInfo ci) {
         if (list == null) return;
         list.addHeader(Component.literal("Pyridium · CUDA"));
-        list.addSmall(OptionInstance.createBoolean("pyridium.options.spectatorCache",
-            OptionInstance.cachedConstantTooltip(Component.translatable("pyridium.options.spectatorCache.tooltip")),
-            RendererSettings.spectatorPrebuild(), RendererSettings::spectatorPrebuild));
+        for (var feature : RendererSettings.Feature.values()) {
+            list.addSmall(OptionInstance.createBoolean(feature.label(),
+                OptionInstance.cachedConstantTooltip(Component.translatable(feature.label() + ".tooltip")),
+                RendererSettings.enabled(feature), value -> RendererSettings.enabled(feature, value)));
+        }
     }
 }

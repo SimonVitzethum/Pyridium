@@ -12,6 +12,20 @@ const testing = std.testing;
 const gpa = testing.allocator;
 const print = std.debug.print;
 
+test "renderer switches preserve unrelated lighting and can disable every secondary effect" {
+    const all = types.lighting_shadows | types.lighting_gi | types.lighting_ao |
+        types.lighting_sun_disk | types.lighting_reflections | types.lighting_gi_half;
+    try testing.expectEqual(all, types.lightingFeatures(all, true, true));
+    const basic = types.lightingFeatures(all, false, false);
+    try testing.expectEqual(types.lighting_sun_disk | types.lighting_no_ray_effects, basic);
+    const direct = types.lightingFeatures(all, true, false);
+    try testing.expectEqual(types.lighting_shadows | types.lighting_sun_disk | types.lighting_reflections, direct);
+    const gi_only = types.lightingFeatures(all, false, true);
+    try testing.expectEqual(types.lighting_gi | types.lighting_ao | types.lighting_sun_disk |
+        types.lighting_gi_half | types.lighting_no_ray_effects, gi_only);
+    try testing.expectEqual(all, types.lightingFeatures(all | types.lighting_no_ray_effects, true, true));
+}
+
 test "brick-tree RT specialization preserves palette rank, skips and non-unit rays" {
     const points = [_]pyrit.dag_builder.Point{
         .{ .x = 1, .y = 1, .z = 1, .attribute = 1 },
@@ -1697,6 +1711,44 @@ const TransFixture = struct {
         return pyr.shade.transparentLayers(spy, s, o, d, 0, if (oh) |h| h.t else types.flt_max, behind, 0xFFFF_FFFF, 0x2, 0x1, 0x1, &rng, 0, null);
     }
 };
+
+test "all effects off traces one visible surface, including glass, without coverage or fog rays" {
+    var fixture: TransFixture = undefined;
+    try fixture.init(glassCube);
+    defer fixture.deinit();
+    const f = &fixture.f;
+    f.mats[4].flags = types.material_transparent | types.material_refract;
+    f.mats[4].roughness = 0;
+    f.scene.transparent_materials[0] |= @as(u64, 1) << 4;
+    f.light.flags = types.lightingFeatures(types.lighting_shadows | types.lighting_gi |
+        types.lighting_ao | types.lighting_reflections | types.lighting_gi_half, false, false);
+    f.light.fog_density = 0.01;
+    f.light.fog_steps = 4;
+    var cam = std.mem.zeroes(types.Camera);
+    common.lookAt(&cam, .{ 10, 60, 10 }, .{ 10, 0, 10 }, .{ 0, 0, -1 });
+    pyrit.pyr_camera_orthographic(&cam, 4, 8, 8);
+    var p = std.mem.zeroes(types.RenderParams);
+    p.cur = common.cameraData(cam);
+    p.prev = p.cur;
+    p.color = 1;
+    p.ray_mask = 3;
+    p.transparent_mask = 2;
+    p.coverage = 4;
+    p.flags = types.render_no_ray_effects | (@as(u32, 1) << 31);
+    const CountingTracer = struct {
+        count: *u32,
+        pub fn trace(self: @This(), s: *const types.Scene, o: vec.Vec3, d: vec.Vec3, tmin: f32, tmax: f32, mask: u32, flags: u32) ?pyr.scene.TraceHit {
+            self.count.* += 1;
+            return pyr.traceScene(s, o, d, tmin, tmax, mask, flags);
+        }
+    };
+    var count: u32 = 0;
+    const result = pyr.render.renderPixelWith(CountingTracer{ .count = &count }, &p, &f.scene, 4, 4);
+    try testing.expectEqual(@as(u32, 1), count);
+    try testing.expectEqual(@as(u32, 1), result.hit.instance);
+    try testing.expectEqual(@as(u32, 4), result.hit.attribute & 0xff);
+    for (result.color) |channel| try testing.expect(std.math.isFinite(channel));
+}
 
 test "Transparenz: Brechung nach Snell, parallel versetzter Durchgang, unsichtbares Medium" {
     // Wasserfläche y = 12, Boden darunter

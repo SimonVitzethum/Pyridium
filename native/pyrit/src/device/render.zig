@@ -144,7 +144,8 @@ pub inline fn primaryRay(p: *const types.RenderParams, x: u32, y: u32) Primary {
     // Strahlen der transparenten Schicht (siehe renderPixelWith)
     // Diagnose (Bit 31 in p.flags): wie früher mit Überspringen
     const old = p.flags & 0x8000_0000 != 0;
-    return .{ .ray = cameraRay(cam, px, py), .mask = p.ray_mask & ~p.transparent_mask, .flags = p.flags | (if (old) types.trace_skip_transparent else 0) };
+    const simple = p.flags & types.render_no_ray_effects != 0;
+    return .{ .ray = cameraRay(cam, px, py), .mask = if (simple) p.ray_mask else p.ray_mask & ~p.transparent_mask, .flags = p.flags | (if (old and !simple) types.trace_skip_transparent else 0) };
 }
 
 pub fn renderPixelWith(tracer: anytype, p: *const types.RenderParams, s: *const types.Scene, x: u32, y: u32) PixelResult {
@@ -152,6 +153,7 @@ pub fn renderPixelWith(tracer: anytype, p: *const types.RenderParams, s: *const 
     const px = @as(f32, @floatFromInt(x)) + 0.5 + cam.jitter[0];
     const py = @as(f32, @floatFromInt(y)) + 0.5 + cam.jitter[1];
     const prim = primaryRay(p, x, y);
+    const ray_effects = p.flags & types.render_no_ray_effects == 0;
     const ray = prim.ray;
     const opaque_mask = p.ray_mask & ~p.transparent_mask;
     // Schatten, GI und Reflexionen dürfen eine andere (gröbere) Auswahl sehen
@@ -163,7 +165,7 @@ pub fn renderPixelWith(tracer: anytype, p: *const types.RenderParams, s: *const 
     // Sonst ist er selbst der Untergrund, und davor liegt nichts Durchsichtiges.
     const first = tracer.trace(s, ray.o, ray.d, ray.tmin, ray.tmax, prim.mask, prim.flags);
     const trans_mask_early = p.ray_mask & p.transparent_mask;
-    const water_front = if (first) |f| shade.anyTransparent(s, trans_mask_early) and shade.hitTransparent(s, f, trans_mask_early) else false;
+    const water_front = if (first) |f| ray_effects and shade.anyTransparent(s, trans_mask_early) and shade.hitTransparent(s, f, trans_mask_early) else false;
     const found = if (water_front) tracer.trace(s, ray.o, ray.d, ray.tmin, ray.tmax, prim.mask, prim.flags | types.trace_skip_transparent) else first;
 
     var r = PixelResult{ .hit = tr.toHit(found), .depth = types.flt_max, .motion = .{ 0, 0 } };
@@ -235,7 +237,7 @@ pub fn renderPixelWith(tracer: anytype, p: *const types.RenderParams, s: *const 
             // der Nachbarn multipliziert zeigten sie sich als violette Säume.
             var alb = vec.Vec3{ sh.albedo[0], sh.albedo[1], sh.albedo[2] };
 
-            var cov = @min(@max(p.coverage, 1), 4);
+            var cov = if (ray_effects) @min(@max(p.coverage, 1), 4) else 1;
             // Die zusätzlichen Strahlen lohnen nur an einer Voxelkante. Wo
             // der Treffer weit genug von der Kante entfernt in seiner Fläche
             // liegt, landen alle Abtastungen ohnehin im selben Voxel – das
@@ -255,7 +257,8 @@ pub fn renderPixelWith(tracer: anytype, p: *const types.RenderParams, s: *const 
                 const material = mats[types.materialIndex(s.reserved_tex, h.attribute)];
                 const cells: f32 = if (material.flags & types.material_cutout == 0) 1 else if (material.flags & types.material_face_atlas != 0 and material.texture > 0 and material.texture < s.texture_count)
                     @floatFromInt(@import("block_texture.zig").tileWidth(s, material.texture, h.face & types.hit_face_mask))
-                else @floatFromInt(@import("dag.zig").cutout_cells);
+                else
+                    @floatFromInt(@import("dag.zig").cutout_cells);
                 var near_edge = false;
                 inline for (0..3) |a| {
                     if (a != axis) {
@@ -341,8 +344,8 @@ pub fn renderPixelWith(tracer: anytype, p: *const types.RenderParams, s: *const 
             // transparenten Ebene, die er wegen der Maske nicht sieht und deren
             // Hülle der Sichtstrahl berührt. Sonst käme `behind` ohnehin
             // bitgleich zurück; gespart: zwei Strahlen je Land- und Himmelspixel.
-            const need_layers = water_front or p.flags & 0x8000_0000 != 0 or
-                (trans_mask != 0 and segmentTouches(ray.o, ray.d, ray.tmin, t_behind, p.trans_lo, p.trans_hi));
+            const need_layers = ray_effects and (water_front or p.flags & 0x8000_0000 != 0 or
+                (trans_mask != 0 and segmentTouches(ray.o, ray.d, ray.tmin, t_behind, p.trans_lo, p.trans_hi)));
             if (@as(*const types.Lighting, @ptrFromInt(s.lighting)).flags & types.lighting_debug_front != 0) {
                 const col: [3]f32 = if (water_front) .{ 0, 0, 1 } else .{ 1, 1, 0 };
                 r.color = .{ col[0], col[1], col[2], r.color[3] };

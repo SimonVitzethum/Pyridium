@@ -22,7 +22,7 @@ public final class Native {
 	private static final ValueLayout.OfInt I = ValueLayout.JAVA_INT;
 
     private static SymbolLookup lib;
-    private static MethodHandle hModelCreate, hModelDestroy, hModelsFrame, hMaterialFaces;
+    private static MethodHandle hModelCreate, hModelDestroy, hModelsFrame, hMaterialFaces, hWorldFeatures;
 	private static final Linker LINKER = Linker.nativeLinker();
 
 	private static MethodHandle hInit, hError, hAlloc, hFree, hUpload, hUpload2d, hDownload2d, hCopy, hCopy2d, hSync, hFill,
@@ -63,7 +63,8 @@ public final class Native {
 		hColSet = fn("pyd_col_set", FunctionDescriptor.ofVoid(I, I, I));
 		hPresentInit = fn("pyd_present_init", FunctionDescriptor.of(I, L, L));
 		hPresent = fn("pyd_present", FunctionDescriptor.of(I, L, I, I, I, I, I));
-		hWorldCreate = fn("pyd_world_create", FunctionDescriptor.of(I, L, I));
+		hWorldCreate = fn("pyd_world_create", FunctionDescriptor.of(I, L, I, I));
+        hWorldFeatures = fn("pyd_world_set_features", FunctionDescriptor.of(I, I));
 		hWorldFrame = fn("pyd_world_frame", FunctionDescriptor.of(I, L));
 		hWorldSetMode = fn("pyd_world_set_mode", FunctionDescriptor.ofVoid(I));
 		hWorldStats = fn("pyd_world_stats", FunctionDescriptor.ofVoid(L));
@@ -320,9 +321,9 @@ public final class Native {
 		}
 	}
 
-	public static void worldCreate(long seed, int mode) {
+	public static void worldCreate(long seed, int mode, int features) {
 		try {
-			check((int)hWorldCreate.invokeExact(seed, mode), "world_create");
+			check((int)hWorldCreate.invokeExact(seed, mode, features), "world_create");
 		} catch (Throwable t) {
 			throw wrap(t);
 		}
@@ -343,6 +344,11 @@ public final class Native {
 			throw wrap(t);
 		}
 	}
+
+    public static void worldSetFeatures(int features) {
+        try { check((int)hWorldFeatures.invokeExact(features), "world_features"); }
+        catch (Throwable t) { throw wrap(t); }
+    }
 
 	/** Ereignis am Ende der eingereihten Arbeit (0 = Fehler) */
 	public static long eventRecord() {

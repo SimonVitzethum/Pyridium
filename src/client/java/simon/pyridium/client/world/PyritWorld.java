@@ -18,6 +18,8 @@ public final class PyritWorld {
 	private static final ByteBuffer CAM = MemoryUtil.memCalloc(96);
 	private static final ByteBuffer STATS = MemoryUtil.memCalloc(48);
 	private static boolean created;
+    private static int createdFeatures;
+    private static int requestedMode;
 	private static boolean failed;
 	private static volatile boolean ready;
 	private static long nextLog;
@@ -48,6 +50,7 @@ public final class PyritWorld {
 
 	public static int mode() {
 		String m = System.getProperty("pyridium.mode", "rr");
+        if (m.equals("rr") && !RendererSettings.enabled(RendererSettings.Feature.RAY_RECONSTRUCTION)) m = "native";
 		return switch (m) {
 			case "native" -> 0;
 			case "dlaa" -> 2;
@@ -63,12 +66,13 @@ public final class PyritWorld {
 		}
 		Minecraft mc = Minecraft.getInstance();
 		try {
-            if (created && BlockPalette.resourcesChanged()) {
+            int features = RendererSettings.nativeFeatures();
+            if (created && (BlockPalette.resourcesChanged() || ((features ^ createdFeatures) & 4) != 0)) {
                 var loaded = new java.util.ArrayList<net.minecraft.world.level.chunk.LevelChunk>();
                 SectionSync.loadedChunks().forEach(loaded::add);
                 levelChanged(mc.level);
                 for (var chunk : loaded) SectionSync.chunkLoaded(mc.level, chunk);
-                LOGGER.info("Pyridium: Ressourcenpakete neu geladen; Material- und Entity-DAG-Caches werden neu aufgebaut");
+                LOGGER.info("Pyridium: Ressourcen oder RT-Core-Auswahl geaendert; Welt- und Material-Caches werden neu aufgebaut");
             }
 			if (!created) {
 				long seed = 1L;
@@ -77,7 +81,9 @@ public final class PyritWorld {
 					seed = server.overworld().getSeed();
 				}
 				// Paletten/Materialien vor dem Generator, der sie benutzt
-                Native.worldCreate(seed, mode());
+                requestedMode = mode();
+                Native.worldCreate(seed, requestedMode, features);
+                createdFeatures = features;
                 float targetFps = Float.parseFloat(System.getProperty("pyridium.targetFps", "165"));
 				// LOD unsichtbar: ein Voxel jeder Stufe hoechstens ~1 Pixel gross
 				Native.worldConfigure(Float.parseFloat(System.getProperty("pyridium.voxelPx", "1.0")),
@@ -93,6 +99,15 @@ public final class PyritWorld {
 				created = true;
 				LOGGER.info("Pyridium: Pyrit-Welt angelegt (Samen {})", seed);
 			}
+            if (features != createdFeatures) {
+                Native.worldSetFeatures(features);
+                createdFeatures = features;
+            }
+            int desiredMode = mode();
+            if (desiredMode != requestedMode) {
+                Native.worldSetMode(desiredMode);
+                requestedMode = desiredMode; // Do not overwrite a native fallback every frame.
+            }
 			SectionSync.tick(Integer.getInteger("pyridium.sectionsPerFrame", 2048));
 			PydTexture target = (PydTexture)mc.gameRenderer.mainRenderTarget().getColorTexture();
 			long a = MemoryUtil.memAddress(CAM);

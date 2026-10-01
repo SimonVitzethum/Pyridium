@@ -1,4 +1,12 @@
 {
+  "pyridium.options.rayReconstruction": "Ray Reconstruction (DLSS RR)",
+  "pyridium.options.rayReconstruction.tooltip": "KI-Rekonstruktion auf Tensor-Cores. Aus: native Auflösung mit CUDA-Nachbearbeitung, kein RR. Explizite JVM-Bildmodi bleiben erhalten.",
+  "pyridium.options.rayEffects": "Raytracing-Effekte",
+  "pyridium.options.rayEffects.tooltip": "Strahlbasierte direkte Schatten, Reflexionen und Wasser-/Glasbrechung. Aus: direkte PBR-Beleuchtung und einfache Wasser-/Glasoberflächen. Primäre Sichtbarkeit bleibt nötig.",
+  "pyridium.options.pathTracing": "Path Tracing / indirektes Licht",
+  "pyridium.options.pathTracing.tooltip": "Indirekte diffuse Lichtpfade (GI). Aus: keine GI-/AO-Strahlen und kein GI-Durchgang. Direkte Beleuchtung bleibt erhalten.",
+  "pyridium.options.hardwareRaytracing": "RT-Cores (OptiX)",
+  "pyridium.options.hardwareRaytracing.tooltip": "Hardware-Beschleunigung der Strahlsuche. Aus: CUDA-Software-Traversierung, kein OptiX. Kann bei großer Sichtweite erheblich langsamer sein! Wechsel baut Welt-/Material-Caches neu auf.",
   "pyridium.options.spectatorCache": "Spectator-DAG vorhalten",
   "pyridium.options.spectatorCache.tooltip": "Baut geladene Innenräume/Höhlen zusätzlich im Hintergrund als HashDAG. Nutzt nur ein begrenztes Budget bei freiem VRAM. Aus: erst beim Wechsel in Spectator aufbauen."
 }

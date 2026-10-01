@@ -1862,6 +1862,9 @@ pub const Context = struct {
         const s = try self.viewSlot(h);
         s.has_last = false;
         s.has_before = false;
+        s.gi_hist_ok = false;
+        s.post_valid = false;
+        s.up_valid = false;
     }
 
     pub fn render(self: *Context, view: usize, camera: *const types.Camera, targets: *const api.Targets) Error!void {
@@ -1925,6 +1928,7 @@ pub const Context = struct {
         }
         // Indirekte Beleuchtung in halber Auflösung: eigener Durchgang und
         // kantenbewusstes Hochskalieren (braucht color, normal, albedo, hits)
+        if (self.lighting.flags & types.lighting_no_ray_effects != 0) params.flags |= types.render_no_ray_effects;
         const half_gi = self.lighting.flags & types.lighting_gi_half != 0 and params.color != 0;
         if (half_gi) {
             if (params.normal == 0 or params.albedo == 0 or params.hits == 0)

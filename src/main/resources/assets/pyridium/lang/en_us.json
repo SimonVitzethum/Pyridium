@@ -1,4 +1,12 @@
 {
+  "pyridium.options.rayReconstruction": "Ray Reconstruction (DLSS RR)",
+  "pyridium.options.rayReconstruction.tooltip": "AI reconstruction on Tensor Cores. Off: native-resolution CUDA post-processing, no RR. Explicit JVM image modes remain selected.",
+  "pyridium.options.rayEffects": "Ray tracing effects",
+  "pyridium.options.rayEffects.tooltip": "Ray-traced direct shadows, reflections and water/glass refraction. Off: direct PBR lighting and simple water/glass surfaces. Primary visibility is still required.",
+  "pyridium.options.pathTracing": "Path tracing / indirect lighting",
+  "pyridium.options.pathTracing.tooltip": "Indirect diffuse light paths (GI). Off: no GI/AO rays or GI pass. Direct lighting remains active.",
+  "pyridium.options.hardwareRaytracing": "RT Cores (OptiX)",
+  "pyridium.options.hardwareRaytracing.tooltip": "Hardware-accelerated ray traversal. Off: CUDA software traversal, no OptiX. Can be much slower at long view distances! Changing this rebuilds world/material caches.",
   "pyridium.options.spectatorCache": "Keep spectator DAG ready",
   "pyridium.options.spectatorCache.tooltip": "Builds loaded interiors/caves as an additional background HashDAG, with a bounded budget when VRAM is available. Off: build on demand in spectator mode."
 }

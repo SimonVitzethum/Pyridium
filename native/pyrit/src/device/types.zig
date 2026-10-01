@@ -349,6 +349,16 @@ pub const lighting_reflections: u32 = 0x10;
 /// hochskalieren (ein Viertel der Strahlen). Braucht color, normal, albedo
 /// und hits als Ziele.
 pub const lighting_gi_half: u32 = 0x20;
+/// No shadow/reflection/refraction effects; primary surfaces remain visible.
+pub const lighting_no_ray_effects: u32 = 0x40;
+
+/// Configure optional illumination without changing materials or visibility.
+pub fn lightingFeatures(base: u32, ray_effects: bool, path_tracing: bool) u32 {
+    var flags = base & ~lighting_no_ray_effects;
+    if (!ray_effects) flags = (flags & ~(lighting_shadows | lighting_reflections)) | lighting_no_ray_effects;
+    if (!path_tracing) flags &= ~(lighting_gi | lighting_gi_half | lighting_ao);
+    return flags;
+}
 /// Diagnose: transparente Schicht zeigt die Strecke im Medium (rot, /32)
 /// und ob ein Austritt gefunden wurde (grün)
 pub const lighting_debug_medium: u32 = 0x8000_0000;
@@ -468,6 +478,8 @@ pub const trace_skip_transparent: u32 = 0x8;
 /// Loaded-area spectator world (mask 4) replaces the approximate world within
 /// 96 blocks of this ray's origin. Mask 1 continues beyond that boundary.
 pub const trace_spectator: u32 = 0x10;
+/// Internal render policy; geometric ray intersection ignores this bit.
+pub const render_no_ray_effects: u32 = 0x20;
 pub const spectator_radius: f32 = 96;
 
 pub const HitEx = extern struct {

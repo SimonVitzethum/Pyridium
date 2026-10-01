@@ -51,6 +51,9 @@ const W = struct {
     gen: scene.Generator = undefined,
     wi: api.WorldInfo = undefined,
     light: types.Lighting = undefined,
+    base_light_flags: u32 = 0,
+    features: u32 = 7,
+    dlss_warmed: bool = false,
     view: api.Handle = null,
     post: api.PostInfo = undefined,
     fx: api.PostFx = undefined,
@@ -303,9 +306,14 @@ fn updateSpectator(c: *const CamIn, o: *const [3]f64, cam: *const types.Camera) 
 }
 
 /// Pyrit-Kontext und Welt anlegen. seed: Weltsamen (Demo-Generator vorerst)
-export fn pyd_world_create(seed: u64, mode: u32) i32 {
+export fn pyd_world_create(seed: u64, mode: u32, features: u32) i32 {
     root.bind();
     if (S.ready) return 0;
+    if (features & ~@as(u32, 7) != 0) {
+        root.setError("Unbekannte Renderer-Features", .{});
+        return -1;
+    }
+    S.features = features;
     if (std.c.getenv("PYRIDIUM_TEST_GPU_DUTY")) |value| {
         const duty = std.fmt.parseFloat(f64, std.mem.span(value)) catch 0;
         if (!std.math.isFinite(duty) or duty <= 0 or duty > 1) {
@@ -317,6 +325,7 @@ export fn pyd_world_create(seed: u64, mode: u32) i32 {
     const gpa = std.heap.c_allocator;
     var ci = scene.createInfo(0);
     ci.flags |= api.create_material16;
+    if (features & 4 == 0) ci.flags |= api.create_no_rt;
     ci.cuda_context = @ptrCast(G.ctx);
     ci.cuda_stream = @ptrCast(G.stream);
     ci.max_textures = 65536; // Shared face tiles + lightweight material recipes
@@ -378,6 +387,8 @@ export fn pyd_world_create(seed: u64, mode: u32) i32 {
             S.light.flags & types.lighting_shadows != 0,
         });
     }
+    S.base_light_flags = S.light.flags;
+    S.light.flags = types.lightingFeatures(S.base_light_flags, features & 1 != 0, features & 2 != 0);
     if (!req(pyrit.pyr_set_lighting(@ptrCast(S.ctx), &S.light), "Licht")) return -1;
     if (!req(pyrit.pyr_view_create(@ptrCast(S.ctx), &S.view), "Ansicht")) return -1;
     S.post = scene.post();
@@ -388,11 +399,50 @@ export fn pyd_world_create(seed: u64, mode: u32) i32 {
     S.ready = true;
     // DLSS (NGX) braucht beim Initialisieren viel Stapel; Javas Render-Thread hat nur
     // rund 1 MiB. Deshalb einmal in einem eigenen Thread mit 64 MiB anwerfen.
-    if (S.mode != .native and S.mode != .taau) {
-        const th = std.Thread.spawn(.{ .stack_size = 64 << 20 }, dlssWarm, .{}) catch null;
-        if (th) |t_| t_.join();
-    }
+    warmDlss();
+    logFeatures();
     return 0;
+}
+
+fn logFeatures() void {
+    std.debug.print("[pyridium] Renderer-Features: RR {any}, GI {any}, RT-Effekte {any}, RT-Cores {any}; Modus {s}\n", .{
+        S.mode == .rr,                                      S.light.flags & types.lighting_gi != 0,
+        S.light.flags & types.lighting_no_ray_effects == 0, pyrit.pyr_features(@ptrCast(S.ctx)) & api.feature_rt_cores != 0,
+        @tagName(S.mode),
+    });
+}
+
+export fn pyd_world_set_features(features: u32) i32 {
+    root.bind();
+    if (!S.ready or features & ~@as(u32, 7) != 0) {
+        root.setError("Welt nicht bereit oder unbekannte Renderer-Features", .{});
+        return -1;
+    }
+    if (features == S.features) return 0;
+    if ((features ^ S.features) & 4 != 0) {
+        root.setError("RT-Core-Wechsel braucht einen neuen Weltkontext", .{});
+        return -1;
+    }
+    var light = S.light;
+    light.flags = types.lightingFeatures(S.base_light_flags, features & 1 != 0, features & 2 != 0);
+    if (!req(pyrit.pyr_set_lighting(@ptrCast(S.ctx), &light), "Renderer-Features")) return -1;
+    if (!req(pyrit.pyr_view_reset_history(@ptrCast(S.ctx), S.view), "Lichtverlauf zuruecksetzen")) return -1;
+    S.light = light;
+    S.features = features;
+    S.frame = 0; // Invalidate the old lighting history.
+    logFeatures();
+    return 0;
+}
+
+fn warmDlss() void {
+    if (S.dlss_warmed or S.mode == .native or S.mode == .taau) return;
+    const thread = std.Thread.spawn(.{ .stack_size = 64 << 20 }, dlssWarm, .{}) catch {
+        root.setError("DLSS-Initialisierungsthread nicht verfuegbar - weiter mit TAAU", .{});
+        S.mode = .taau;
+        return;
+    };
+    thread.join();
+    S.dlss_warmed = true;
 }
 
 fn dlssWarm() void {
@@ -448,11 +498,15 @@ export fn pyd_world_configure(px: f32, view_chunks: u32, target_fps: f32) i32 {
 export fn pyd_world_set_mode(mode: u32) void {
     const m: Mode = @enumFromInt(@min(mode, 4));
     if (m == S.mode) return;
+    if (S.ready and !req(pyrit.pyr_view_reset_history(@ptrCast(S.ctx), S.view), "Bildverlauf zuruecksetzen")) return;
     S.mode = m;
     const target_fps = S.resolution.target_fps;
     S.resolution = .{};
     S.resolution.configure(target_fps);
     S.rw = 0; // Ziele neu
+    // Also safe when RR is first enabled after starting in native mode.
+    warmDlss();
+    logFeatures();
 }
 
 pub fn nowMs() i64 {
