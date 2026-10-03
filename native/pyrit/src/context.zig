@@ -332,6 +332,9 @@ pub const Context = struct {
     history_counter: u32 = 0,
     /// seit dem letzten Commit strukturelle Instanzänderung (für die IAS)
     instances_structural: bool = false,
+    /// Only changes used by traversal require an IAS update. History/user data
+    /// still upload normally, but do not change bounds or visibility.
+    instances_rt_dirty: bool = false,
 
     // Frame
     frame: u64 = 0,
@@ -1671,6 +1674,7 @@ pub const Context = struct {
 
     pub fn instanceCreate(self: *Context, geometry: usize) Error!usize {
         self.instances_structural = true;
+        self.instances_rt_dirty = true;
         const g = try self.geometrySlot(geometry);
         const idx = allocSlot(&self.instance_free, &self.instance_high, self.instances.len) orelse
             return fail(error.Capacity, "max_instances erreicht", .{});
@@ -1698,6 +1702,7 @@ pub const Context = struct {
 
     pub fn instanceDestroy(self: *Context, h: usize) Error!void {
         self.instances_structural = true;
+        self.instances_rt_dirty = true;
         const s = try self.instanceSlot(h);
         const idx = decodeHandle(h).index;
         try self.markDirty(idx);
@@ -1710,17 +1715,21 @@ pub const Context = struct {
 
     pub fn instanceSetTransform(self: *Context, h: usize, m: *const [12]f32) Error!void {
         const s = try self.instanceSlot(h);
+        if (std.mem.eql(f32, &s.data.object_to_world, m)) return;
         const inv = xform.inverse(m) orelse return fail(error.InvalidArgument, "Transformation ist nicht invertierbar", .{});
         s.data.object_to_world = m.*;
         s.data.world_to_object = inv;
         self.updateBounds(s);
         try self.markDirty(decodeHandle(h).index);
+        self.instances_rt_dirty = true;
     }
 
     pub fn instanceSetGeometry(self: *Context, h: usize, geometry: usize) Error!void {
-        self.instances_structural = true;
         const s = try self.instanceSlot(h);
         const g = try self.geometrySlot(geometry);
+        if (s.geometry == decodeHandle(geometry).index) return;
+        self.instances_structural = true;
+        self.instances_rt_dirty = true;
         self.geometries[s.geometry].refs -= 1;
         g.refs += 1;
         s.geometry = decodeHandle(geometry).index;
@@ -1736,12 +1745,15 @@ pub const Context = struct {
     /// werden (Welt-Chunks).
     pub fn instanceSetMask(self: *Context, h: usize, mask: u32) Error!void {
         const s = try self.instanceSlot(h);
+        if (s.data.mask == mask) return;
         s.data.mask = mask;
         try self.markDirty(decodeHandle(h).index);
+        self.instances_rt_dirty = true;
     }
 
     pub fn instanceSetUser(self: *Context, h: usize, user: u32) Error!void {
         const s = try self.instanceSlot(h);
+        if (s.data.user == user) return;
         s.data.user = user;
         try self.markDirty(decodeHandle(h).index);
     }
@@ -1749,6 +1761,7 @@ pub const Context = struct {
     /// intern (Welt): Instanz erbt den Verlauf ihrer Umgebung
     pub fn instanceKeepHistory(self: *Context, h: usize) Error!void {
         const s = try self.instanceSlot(h);
+        if (s.data.flags & types.instance_keep_history != 0) return;
         s.data.flags |= types.instance_keep_history;
         try self.markDirty(decodeHandle(h).index);
     }
@@ -1819,10 +1832,11 @@ pub const Context = struct {
         self.dirty_cur.clearRetainingCapacity();
         try self.uploadScene();
         if (self.rt) |r| {
-            if (write_count > 0 or animated) r.markInstancesDirty(self.instances_structural);
+            if (self.instances_rt_dirty or animated) r.markInstancesDirty(self.instances_structural);
             self.instances_structural = false;
             try r.buildInstances(self, self.instance_buf[self.parity], self.instance_high);
         }
+        self.instances_rt_dirty = false;
         try self.fenceDeferred();
         try self.releaseDeferred(false);
     }
@@ -3226,6 +3240,48 @@ test "Handles" {
     try std.testing.expectEqual(@as(u32, 5), d.index);
     try std.testing.expectEqual(@as(u32, 7), d.generation);
     try std.testing.expect(encodeHandle(0, 0) != 0);
+}
+
+test "unchanged instance submissions preserve history and do not upload or refit" {
+    const t = std.testing;
+    var slots = [_]InstanceSlot{.{ .alive = true }};
+    slots[0].data.object_to_world = .{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0 };
+    slots[0].data.mask = 0xff;
+    slots[0].data.history = 42;
+    var geometries = [_]GeometrySlot{.{ .alive = true }};
+    geometries[0].data.log2_size = 3;
+    var ctx: Context = undefined;
+    ctx.gpa = t.allocator;
+    ctx.instances = &slots;
+    ctx.geometries = &geometries;
+    ctx.frame = 0;
+    ctx.history_counter = 42;
+    ctx.dirty_cur = .empty;
+    ctx.instances_rt_dirty = false;
+    ctx.instances_structural = false;
+    defer ctx.dirty_cur.deinit(t.allocator);
+    const h = encodeHandle(0, 1);
+    try ctx.instanceSetTransform(h, &slots[0].data.object_to_world);
+    try ctx.instanceSetMask(h, 0xff);
+    try ctx.instanceSetGeometry(h, h);
+    try ctx.instanceSetUser(h, 0);
+    try t.expectEqual(@as(usize, 0), ctx.dirty_cur.items.len);
+    try t.expectEqual(@as(u32, 42), slots[0].data.history);
+    try t.expect(!ctx.instances_rt_dirty and !ctx.instances_structural);
+    try ctx.instanceSetUser(h, 7);
+    try ctx.instanceResetHistory(h);
+    try t.expectEqual(@as(usize, 1), ctx.dirty_cur.items.len);
+    try t.expect(!ctx.instances_rt_dirty);
+    try ctx.instanceSetMask(h, 0);
+    try t.expect(ctx.instances_rt_dirty);
+    ctx.instances_rt_dirty = false;
+    var m = slots[0].data.object_to_world;
+    m[3] = 12;
+    try ctx.instanceSetTransform(h, &m);
+    try t.expect(ctx.instances_rt_dirty);
+    try t.expectApproxEqAbs(@as(f32, 12), slots[0].data.bounds_min[0], 0.001);
+    try t.expectEqual(@as(f32, -12), slots[0].data.world_to_object[3]);
+    try t.expectError(error.InvalidHandle, ctx.instanceSetMask(encodeHandle(0, 2), 0));
 }
 
 test "geometry memory groups isolate worlds without double-counting shared DAG batches" {
