@@ -37,14 +37,20 @@ export fn __raygen__trace() callconv(.nvptx_kernel) void {
 export fn __raygen__slots() callconv(.nvptx_kernel) void {
     const prm = params();
     const rp = &prm.replay;
-    const i = ox.launchIndex()[0];
-    if (i >= @min(@as(*const u32, @ptrFromInt(rp.count)).*, rp.capacity)) return;
-    const k = @as([*]const u32, @ptrFromInt(rp.list))[i];
-    const ray = @as([*]const types.ReplayRay, @ptrFromInt(rp.rays))[k];
-    var p = [4]u32{ @bitCast(types.flt_max), types.no_hit, 0, @intFromBool(ray.flags & types.trace_skip_transparent != 0) };
-    if (prm.handle != 0) common.tracePolicy(prm.handle, ray.o, ray.d, ray.tmin, ray.tmax, ray.mask, ray.flags, &p);
-    @as([*]types.ReplayHit, @ptrFromInt(rp.hits))[k] = .{ .t = @bitCast(p[0]), .instance = p[1], .attribute = p[2], .face = p[3] };
-    @as([*]u32, @ptrFromInt(rp.state))[k] = 2;
+    const count = @min(@as(*const u32, @ptrFromInt(rp.count)).*, rp.capacity);
+    const stride = ox.launchDimensions()[0];
+    var i = ox.launchIndex()[0];
+    // The queue size remains on the GPU. A bounded launch visits it with a
+    // grid-stride loop, avoiding millions of empty raygen invocations in
+    // late replay passes without a CPU count readback or synchronization.
+    while (i < count) : (i += stride) {
+        const k = @as([*]const u32, @ptrFromInt(rp.list))[i];
+        const ray = @as([*]const types.ReplayRay, @ptrFromInt(rp.rays))[k];
+        var p = [4]u32{ @bitCast(types.flt_max), types.no_hit, 0, @intFromBool(ray.flags & types.trace_skip_transparent != 0) };
+        if (prm.handle != 0) common.tracePolicy(prm.handle, ray.o, ray.d, ray.tmin, ray.tmax, ray.mask, ray.flags, &p);
+        @as([*]types.ReplayHit, @ptrFromInt(rp.hits))[k] = .{ .t = @bitCast(p[0]), .instance = p[1], .attribute = p[2], .face = p[3] };
+        @as([*]u32, @ptrFromInt(rp.state))[k] = 2;
+    }
 }
 
 export fn __intersection__dag() callconv(.nvptx_kernel) void {

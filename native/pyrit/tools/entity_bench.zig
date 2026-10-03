@@ -58,6 +58,7 @@ pub fn main(init: std.process.Init) !void {
     var frames: u32 = 120;
     var w: u32 = 1920;
     var h: u32 = 1080;
+    var scale: u32 = 1;
     var animated = false;
     var rt_threads: ?[:0]const u8 = null;
     var out: []const u8 = "/tmp/pyrit-crowd.ppm";
@@ -71,6 +72,8 @@ pub fn main(init: std.process.Init) !void {
             if (std.mem.eql(u8, key, "--entities")) count = try std.fmt.parseInt(u32, args[i], 10) else if (std.mem.eql(u8, key, "--frames")) frames = try std.fmt.parseInt(u32, args[i], 10) else if (std.mem.eql(u8, key, "--out")) out = args[i] else if (std.mem.eql(u8, key, "--rt-threads")) {
                 if (try std.fmt.parseInt(u32, args[i], 10) == 0) return error.Usage;
                 rt_threads = try init.arena.allocator().dupeZ(u8, args[i]);
+            } else if (std.mem.eql(u8, key, "--scale")) {
+                scale = try std.fmt.parseInt(u32, args[i], 10);
             } else if (std.mem.eql(u8, key, "--size")) {
                 var wh = std.mem.splitScalar(u8, args[i], 'x');
                 w = try std.fmt.parseInt(u32, wh.next() orelse return error.Usage, 10);
@@ -78,7 +81,7 @@ pub fn main(init: std.process.Init) !void {
             } else return error.Usage;
         } else return error.Usage;
     }
-    if (count == 0 or count > 2000000 or frames < 2 or w == 0 or h == 0 or w > 3840 or h > 2160) return error.Usage;
+    if (count == 0 or count > 2000000 or frames < 2 or w == 0 or h == 0 or w > 3840 or h > 2160 or (scale != 1 and scale != 2) or w % scale != 0 or h % scale != 0) return error.Usage;
     if (rt_threads) |value| if (setenv("PYRIT_RT_THREADS", value.ptr, 1) != 0) return error.Environment;
     drv = try cuda.Driver.load();
     defer drv.lib.close();
@@ -150,10 +153,13 @@ pub fn main(init: std.process.Init) !void {
     const target = [3]f32{ 0, 1, 16 };
     const up = [3]f32{ 0, 1, 0 };
     pyrit.pyr_camera_look_at(&cam, &eye, &target, &up);
-    pyrit.pyr_camera_perspective(&cam, 0.9, w, h, 0.1);
-    const n = @as(usize, w) * h;
+    const rw = w / scale;
+    const rh = h / scale;
+    pyrit.pyr_camera_perspective(&cam, 0.9, rw, rh, 0.1);
+    const n = @as(usize, rw) * rh;
+    const output_n = @as(usize, w) * h;
     var targets = std.mem.zeroes(api.Targets);
-    const buffers = [_]u64{ try alloc(n * 16), try alloc(n * 8), try alloc(n * 16), try alloc(n * 16), try alloc(n * 16), try alloc(n * 4) };
+    const buffers = [_]u64{ try alloc(n * 16), try alloc(n * 8), try alloc(n * 16), try alloc(n * 16), try alloc(n * 16), try alloc(output_n * 4) };
     defer for (buffers) |p| {
         _ = drv.cuMemFree_v2(p);
     };
@@ -162,9 +168,12 @@ pub fn main(init: std.process.Init) !void {
     targets.color = buffers[2];
     targets.normal = buffers[3];
     targets.albedo = buffers[4];
+    targets.detail_scale = @floatFromInt(scale);
     var post = std.mem.zeroes(api.PostInfo);
     post.output_ldr = buffers[5];
-    post.upscaler = api.upscaler_none;
+    post.upscaler = if (scale == 1) api.upscaler_none else api.upscaler_taau;
+    post.output_width = w;
+    post.output_height = h;
     post.denoise_iterations = 2;
     post.clamp_sigma = 1.5;
     post.tonemap = types.tonemap_neutral;
@@ -173,7 +182,7 @@ pub fn main(init: std.process.Init) !void {
     var stats: api.Stats = undefined;
     try req(pyrit.pyr_get_stats(@ptrCast(ctx), &stats));
     if (stats.instances != count or stats.geometries != 1) return error.WrongScene;
-    std.debug.print("crowd: {d} actors, 1 shared humanoid HashDAG, {d}x{d} native, GPU animation {any}, setup {d:.1} ms\n", .{ count, w, h, animated, @as(f64, @floatFromInt(ns(false) - start)) / 1e6 });
+    std.debug.print("crowd: {d} actors, 1 shared humanoid HashDAG, {d}x{d} output / {d}x{d} internal, CUDA TAAU {any}, GPU animation {any}, setup {d:.1} ms\n", .{ count, w, h, rw, rh, scale > 1, animated, @as(f64, @floatFromInt(ns(false) - start)) / 1e6 });
     const times = try init.gpa.alloc(f64, frames);
     defer init.gpa.free(times);
     var gpu_sum: f64 = 0;
@@ -216,9 +225,9 @@ pub fn main(init: std.process.Init) !void {
     std.mem.sort(f64, times, {}, std.sort.asc(f64));
     const nf: f64 = @floatFromInt(frames);
     std.debug.print("RESULT actors={d} animated={any} frames={d} fps={d:.2} wall_ms={d:.3} gpu_ms={d:.3} submit_ms={d:.3} p50_ms={d:.3} p95_ms={d:.3} p99_ms={d:.3} cpu_core_percent={d:.1}\n", .{ count, animated, frames, 1000 * nf / wall, wall / nf, gpu_sum / nf, submit_sum / nf, times[times.len / 2], times[@min(times.len - 1, times.len * 95 / 100)], times[@min(times.len - 1, times.len * 99 / 100)], 100 * cpu / wall });
-    const pixels = try init.gpa.alloc([4]u8, n);
+    const pixels = try init.gpa.alloc([4]u8, output_n);
     defer init.gpa.free(pixels);
-    try cu(drv.cuMemcpyDtoH_v2(pixels.ptr, buffers[5], n * 4));
+    try cu(drv.cuMemcpyDtoH_v2(pixels.ptr, buffers[5], output_n * 4));
     var image: std.ArrayList(u8) = .empty;
     defer image.deinit(init.gpa);
     var header: [80]u8 = undefined;

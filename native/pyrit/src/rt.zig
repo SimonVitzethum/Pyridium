@@ -537,6 +537,12 @@ pub const Rt = struct {
         const tile: u32 = if (std.c.getenv("PYRIT_REPLAY_TILE")) |e| (std.fmt.parseInt(u32, std.mem.span(e), 10) catch replay_tile_pixels) else replay_tile_pixels;
         const rows = @max(@min(h, tile / @max(w, 1)), 1);
         const tile_px = w * rows;
+        // Large empty launches cost time in late replay passes. The GPU keeps
+        // the queue count; enough resident workers visit all actual rays.
+        const rt_threads: u32 = if (std.c.getenv("PYRIT_RT_THREADS")) |e|
+            @max(std.fmt.parseInt(u32, std.mem.span(e), 10) catch 65536, 1)
+        else
+            65536;
         try self.replay.ensure(c, tile_px);
         var params = std.mem.zeroes(types.RtParams);
         params.handle = self.ias_handle;
@@ -595,7 +601,7 @@ pub const Rt = struct {
                 try c.launch(f, .{ (n_px + b - 1) / b, 1, 1 }, .{ b, 1, 1 }, &args);
                 c.mark(if (gi) "GI schattieren" else if (per_pass_timing) pass_names[@min(pass, 4)] else "Bild schattieren");
                 // der letzte Durchgang schattiert nur noch fertig, er verfolgt nichts
-                if (pass + 1 < passes) try self.launch(c, g_raygen_slots, &params, @min(rb.capacity, n_px * replay_list_per_pixel), 1);
+                if (pass + 1 < passes) try self.launch(c, g_raygen_slots, &params, @min(rt_threads, @min(rb.capacity, n_px * replay_list_per_pixel)), 1);
                 c.mark(if (gi) "GI RT" else if (per_pass_timing) rt_names[@min(pass, 4)] else "Bild RT");
                 // Diagnose: Anfragen je Durchgang über alle Streifen (synchronisiert)
                 if (stats) {
