@@ -10,7 +10,7 @@ import org.slf4j.LoggerFactory;
 public final class RendererSettings {
     private static final Path FILE = FabricLoader.getInstance().getConfigDir().resolve("pyridium-renderer.properties");
     public enum Feature {
-        RAY_RECONSTRUCTION("rayReconstruction", "rayReconstruction", 0, true),
+        RAY_RECONSTRUCTION("rayReconstruction", "rayReconstruction", 0, false),
         RAY_EFFECTS("rayEffects", "rayEffects", 1, true),
         PATH_TRACING("pathTracing", "pathTracing", 2, true),
         HARDWARE_RT("hardwareRaytracing", "hardwareRaytracing", 4, true),

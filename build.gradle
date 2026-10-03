@@ -31,11 +31,13 @@ java {
 
 // ---- Native Seite (Zig): Pyrit + libpyridium.so ----
 // native/pyrit ist ein Schnappschuss von ~/Schreibtisch/Pyrit (dort wird nichts veraendert).
-// DLSS-SDK: -PdlssSdk=<pfad>, sonst ../Pyrit/DLSS falls vorhanden.
+// CUDA-only by default. DLSS (including Vulkan frame-generation interop)
+// is linked only when explicitly requested with -PdlssSdk=<path>.
 def nativeSrc = file("native/pyrit")
 def nativeOut = file("$buildDir/native")
-def dlssSdk = project.findProperty("dlssSdk") ?: (file("../Pyrit/DLSS/include").exists() ? file("../Pyrit/DLSS").absolutePath : null)
+def dlssSdk = project.findProperty("dlssSdk")
 tasks.register("buildNative", Exec) {
+	inputs.property("dlssSdk", dlssSdk ?: "disabled")
 	inputs.files(fileTree(nativeSrc) { exclude '.zig-cache/**', 'zig-out/**' }).withPropertyName("src").skipWhenEmpty(false)
 	outputs.file("$nativeOut/libpyridium.so")
 	workingDir nativeSrc

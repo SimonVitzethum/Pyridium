@@ -39,6 +39,7 @@ import simon.pyridium.client.mixin.ModelPartAccessor;
  * covers models, items and quad-based custom geometry, not every feature submit.
  */
 public final class EntityScene {
+    private static final int MAX_MODEL_PARTS = 1 << 20;
     private static final Logger LOG = LogUtils.getLogger();
     private static final Map<Object, Geometry> GEOMETRIES = new HashMap<>();
     private static final Map<InstanceKey, Identity> IDENTITIES = new HashMap<>();
@@ -350,14 +351,15 @@ public final class EntityScene {
     }
 
     private static void append(long id, long geometry, Matrix4f m) {
-        if (instanceCount >= 32768) throw new IllegalStateException("Zu viele Entity-Modellteile");
+        if (instanceCount >= MAX_MODEL_PARTS) throw new IllegalStateException("Entity-Modellteilkapazität überschritten: " + MAX_MODEL_PARTS);
         if (instances == null) instances = MemoryUtil.memAlloc(64 * 256);
         if ((instanceCount + 1) * 64 > instances.capacity()) instances = MemoryUtil.memRealloc(instances, instances.capacity() * 2);
         int o = instanceCount++ * 64;
         instances.putLong(o, id);
         instances.putLong(o + 8, geometry);
         // JOML columns -> Pyrit row-major 3x4.
-        float[] rows = {m.m00(), m.m10(), m.m20(), m.m30(), m.m01(), m.m11(), m.m21(), m.m31(), m.m02(), m.m12(), m.m22(), m.m32()};
-        for (int k = 0; k < 12; k++) instances.putFloat(o + 16 + k * 4, rows[k]);
+        instances.putFloat(o + 16, m.m00()).putFloat(o + 20, m.m10()).putFloat(o + 24, m.m20()).putFloat(o + 28, m.m30());
+        instances.putFloat(o + 32, m.m01()).putFloat(o + 36, m.m11()).putFloat(o + 40, m.m21()).putFloat(o + 44, m.m31());
+        instances.putFloat(o + 48, m.m02()).putFloat(o + 52, m.m12()).putFloat(o + 56, m.m22()).putFloat(o + 60, m.m32());
     }
 }

@@ -50,7 +50,7 @@ public final class PyritWorld {
 
 	public static int mode() {
 		String m = System.getProperty("pyridium.mode", "rr");
-        if (m.equals("rr") && !RendererSettings.enabled(RendererSettings.Feature.RAY_RECONSTRUCTION)) m = "native";
+        if (m.equals("rr") && !RendererSettings.enabled(RendererSettings.Feature.RAY_RECONSTRUCTION)) m = "taau";
 		return switch (m) {
 			case "native" -> 0;
 			case "dlaa" -> 2;

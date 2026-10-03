@@ -189,6 +189,7 @@ public final class LodGenerator {
 			g.callbackWaiting = true;
 			synchronized (g) {
 				g.callbackWaiting = false;
+				g.notifyAll();
 				long t0 = System.nanoTime();
 				boolean ok = g.run(keys, count, voxels, counts, capacity, known);
 				g.msTotal += (System.nanoTime() - t0) / 1e6;
@@ -316,11 +317,10 @@ public final class LodGenerator {
 					Thread.sleep(20);
 					continue;
 				}
-				// Pyrits Auftraege haben Vorrang: kurz Platz machen
-				while (this.callbackWaiting) {
-					Thread.onSpinWait();
-				}
 				synchronized (this) {
+					// Give the waiting render-world callback the monitor. Waiting
+					// releases it and consumes no CPU while CUDA work is running.
+					while (this.callbackWaiting && !this.stop && active == this) this.wait();
 					if (active != this) {
 						return;
 					}

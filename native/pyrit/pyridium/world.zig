@@ -77,6 +77,11 @@ const W = struct {
 
 var S: W = .{};
 
+/// Shared DAGs need one transform per visible part, not one DAG per actor.
+/// Reserve separately from the 65536 world chunks so crowds cannot consume
+/// the world streamer's slots. This is a rendering capacity, not a mob limit.
+pub const max_model_parts: u32 = 1 << 20;
+
 fn req(r: api.Result, what: []const u8) bool {
     if (r == api.ok) return true;
     root.setError("Pyrit {s}: {s}: {s}", .{ what, pyrit.pyr_result_string(r), pyrit.pyr_error_message() });
@@ -324,6 +329,7 @@ export fn pyd_world_create(seed: u64, mode: u32, features: u32) i32 {
     }
     const gpa = std.heap.c_allocator;
     var ci = scene.createInfo(0);
+    ci.max_instances += max_model_parts;
     ci.flags |= api.create_material16;
     if (features & 4 == 0) ci.flags |= api.create_no_rt;
     ci.cuda_context = @ptrCast(G.ctx);

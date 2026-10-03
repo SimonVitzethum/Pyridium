@@ -22,6 +22,7 @@ import simon.pyridium.client.gpu.Native;
  */
 public class PydSurface implements GpuSurfaceBackend {
 	private static final Logger LOGGER = LogUtils.getLogger();
+    private static final java.lang.management.OperatingSystemMXBean SYSTEM = java.lang.management.ManagementFactory.getOperatingSystemMXBean();
 	private final long window;
 	private final BooleanSupplier iconified;
 	private GpuSurface.@Nullable Configuration config;
@@ -95,8 +96,16 @@ public class PydSurface implements GpuSurfaceBackend {
 		long now = System.nanoTime();
 		if (this.fpsStart == 0) {
 			this.fpsStart = now;
+            this.cpuStart = processCpuTime();
 		} else if (now - this.fpsStart > 5_000_000_000L) {
 			LOGGER.info("Pyridium: {} FPS ({}x{})", String.format("%.1f", (this.frames - this.fpsFrames) * 1e9 / (now - this.fpsStart)), s.getWidth(0), s.getHeight(0));
+            long cpu = processCpuTime();
+            if (cpu >= this.cpuStart && this.cpuStart >= 0) {
+                double cores = (double)(cpu - this.cpuStart) / (now - this.fpsStart);
+                LOGGER.info("Pyridium: CPU-Prozess {} Kerne, {} % von {} logischen CPUs", String.format("%.2f", cores),
+                    String.format("%.1f", 100 * cores / SYSTEM.getAvailableProcessors()), SYSTEM.getAvailableProcessors());
+            }
+            this.cpuStart = cpu;
 			this.fpsStart = now;
 			this.fpsFrames = this.frames;
 		}
@@ -106,6 +115,11 @@ public class PydSurface implements GpuSurfaceBackend {
 	private long frames;
 	private long lastFrameEvent;
 	private long fpsStart, fpsFrames;
+    private long cpuStart;
+
+    private static long processCpuTime() {
+        return SYSTEM instanceof com.sun.management.OperatingSystemMXBean system ? system.getProcessCpuTime() : -1;
+    }
 	private long nextShot = System.currentTimeMillis() + 5000;
 	private int shotIndex;
 

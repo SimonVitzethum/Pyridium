@@ -79,7 +79,10 @@ export fn pyd_model_create(faces: [*]const t.ModelFace, face_count: u32, count: 
 export fn pyd_models_frame(models: [*]const t.ModelInstance, count: u32) i32 {
     root.bind();
     const ctx = world.context() orelse return -1;
-    if (count > 32768) return -1;
+    if (count > world.max_model_parts) {
+        root.setError("Entity-Modellteile: {d} überschreiten Kapazität {d}", .{ count, world.max_model_parts });
+        return -1;
+    }
     frame += 1;
     for (models[0..count]) |m| {
         if (m.id == 0 or m.geometry == 0) return -1;
