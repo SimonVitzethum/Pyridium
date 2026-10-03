@@ -196,6 +196,12 @@ pub fn build(b: *std.Build) void {
     if (b.args) |a| run_render.addArgs(a);
     b.step("render", "Bild rendern (GPU): zig build render -- --out bild.ppm").dependOn(&run_render.step);
 
+    const crowd = b.addExecutable(.{ .name = "pyrit-entity-bench", .root_module = demoUserModule(b, "tools/entity_bench.zig", target, optimize, ptx_files, demo_ptx) });
+    const run_crowd = b.addRunArtifact(crowd);
+    if (b.args) |a| run_crowd.addArgs(a);
+    b.step("entity-bench", "Windowless shared HashDAG crowd, GPU animation and frame/CPU timings").dependOn(&run_crowd.step);
+    b.step("entity-bench-build", "Build the windowless crowd benchmark").dependOn(&b.addInstallArtifact(crowd, .{}).step);
+
     // Pyridium (Minecraft-Renderer): libpyridium.so mit eigenen Kerneln,
     // Pyrit statisch gelinkt und der Szene der Demo (Licht, Materialien)
     {

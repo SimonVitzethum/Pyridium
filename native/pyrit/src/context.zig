@@ -1785,22 +1785,37 @@ pub const Context = struct {
         // Einträge des Vorframes, die jetzt nicht neu geschrieben werden, nach vorn kopieren
         var copy_count: u32 = 0;
         const write_count: u32 = @intCast(self.dirty_cur.items.len);
-        const total = write_count + self.dirty_prev.items.len;
-        if (total > 0) {
-            const writes_bytes = @as(usize, write_count) * scratch_write_bytes;
-            const buf = try self.stagingAlloc(writes_bytes + self.dirty_prev.items.len * 4);
+        // Large crowds exceed the pinned ring (500k writes already need
+        // 72 MiB). Upload in bounded chunks instead of requiring a giant ring.
+        const writes_bytes = @as(usize, write_count) * scratch_write_bytes;
+        const max_writes = self.staging.len / 2 / scratch_write_bytes;
+        var offset: usize = 0;
+        while (offset < write_count) {
+            const n = @min(write_count - offset, max_writes);
+            const buf = try self.stagingAlloc(n * scratch_write_bytes);
             const writes: [*]align(1) types.InstanceWrite = @ptrCast(buf.ptr);
-            for (self.dirty_cur.items, 0..) |idx, i| {
+            for (self.dirty_cur.items[offset..][0..n], 0..) |idx, i| {
                 writes[i] = .{ .index = idx, .reserved = .{ 0, 0, 0 }, .data = self.instances[idx].data };
             }
-            const copies: [*]align(1) u32 = @ptrCast(buf.ptr + writes_bytes);
-            for (self.dirty_prev.items) |idx| {
-                if (self.instances[idx].dirty_mark == next_frame) continue;
-                copies[copy_count] = idx;
-                copy_count += 1;
+            try self.check(self.drv.cuMemcpyHtoDAsync_v2(self.update_scratch + offset * scratch_write_bytes, buf.ptr, buf.len, self.stream), "cuMemcpyHtoDAsync");
+            offset += n;
+        }
+        offset = 0;
+        const max_copies = self.staging.len / 2 / 4;
+        while (offset < self.dirty_prev.items.len) {
+            const n = @min(self.dirty_prev.items.len - offset, max_copies);
+            const buf = try self.stagingAlloc(n * 4);
+            const copies: [*]align(1) u32 = @ptrCast(buf.ptr);
+            var used: usize = 0;
+            for (self.dirty_prev.items[offset..][0..n]) |idx| {
+                if (self.instances[idx].dirty_mark != next_frame) {
+                    copies[used] = idx;
+                    used += 1;
+                }
             }
-            const used = writes_bytes + @as(usize, copy_count) * 4;
-            try self.check(self.drv.cuMemcpyHtoDAsync_v2(self.update_scratch, buf.ptr, used, self.stream), "cuMemcpyHtoDAsync");
+            if (used > 0) try self.check(self.drv.cuMemcpyHtoDAsync_v2(self.update_scratch + writes_bytes + @as(usize, copy_count) * 4, buf.ptr, used * 4, self.stream), "cuMemcpyHtoDAsync");
+            copy_count += @intCast(used);
+            offset += n;
         }
 
         self.frame = next_frame;
