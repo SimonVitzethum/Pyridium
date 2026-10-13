@@ -43,6 +43,14 @@ cp -a -- "$source_world" "$test_dir/saves/RenderTest"
 if [[ -f "$project_dir/run/options.txt" ]]; then
     cp -- "$project_dir/run/options.txt" "$test_dir/options.txt"
 fi
+# Tests sind immer stumm (nur die Wegwerfkopie, nie Spieler-Optionen):
+# kein Audio-Backend (SDL-Dummy beim Start, siehe unten) UND alle
+# Sound-Kategorien auf 0, damit die Sound-Engine auch keine CPU frisst.
+touch -- "$test_dir/options.txt"
+sed -i -E 's/^(soundCategory_[a-z_]+:).*/\10.0/' "$test_dir/options.txt"
+for cat in master music record weather block hostile neutral player ambient voice; do
+    grep -q -- "^soundCategory_$cat:" "$test_dir/options.txt" || echo "soundCategory_$cat:0.0" >> "$test_dir/options.txt"
+done
 if [[ -n "${PYRIDIUM_TEST_PACK:-}" ]]; then
     test_pack=$(realpath -- "$PYRIDIUM_TEST_PACK")
     [[ -f "$test_pack" ]] || { echo "Missing test resource pack" >&2; exit 2; }

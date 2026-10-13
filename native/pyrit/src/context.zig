@@ -160,6 +160,7 @@ const ViewSlot = struct {
     /// (scene_seq), Licht-Flags und GI-Modus. Maske: bit i = Puffer i gültig
     /// (hits, color, normal, albedo, material, depth, motion).
     stat_ok: bool = false,
+    stat_logged: bool = false,
     stat_w: u32 = 0,
     stat_h: u32 = 0,
     stat_mask: u32 = 0,
@@ -381,6 +382,13 @@ pub const Context = struct {
     /// Ursprung) erhöht ihn im Commit. Der statische Frame-Reuse vergleicht
     /// ihn statt die Szene zu lesen (CPU liest nie von der GPU zurück).
     scene_seq: u64 = 0,
+    /// Hülle der transparenten Ebene je Maske (CPU-Cache für render()):
+    /// 43k Instanzen pro Frame auf dem Host zu umrunden hält die CPU auf;
+    /// Neuberechnung nur bei Szenenänderung, sonst Cache.
+    trans_seq: u64 = 0,
+    trans_mask: u32 = 0,
+    trans_lo: [3]f32 = .{ 1, 1, 1 },
+    trans_hi: [3]f32 = .{ 0, 0, 0 },
 
     const scratch_write_bytes = @sizeOf(types.InstanceWrite);
 
@@ -1982,6 +1990,7 @@ pub const Context = struct {
         s.gi_hist_ok = false;
         s.gi_tick = 0;
         s.stat_ok = false;
+        s.stat_logged = false;
         s.post_valid = false;
         s.up_valid = false;
     }
@@ -2029,6 +2038,10 @@ pub const Context = struct {
             if (targets.material != 0) try self.copyDtoD(targets.material, v.stat_material, n * 8);
             if (targets.depth != 0) try self.copyDtoD(targets.depth, v.stat_depth, n * 4);
             if (targets.motion != 0) try self.copyDtoD(targets.motion, v.stat_motion, n * 8);
+            if (!v.stat_logged) {
+                v.stat_logged = true;
+                std.debug.print("[pyrit] statischer Frame-Reuse aktiv ({d}x{d})\n", .{ camera.width, camera.height });
+            }
             return;
         }
 
@@ -2059,19 +2072,27 @@ pub const Context = struct {
             .gi_width = 0,
             .gi_height = 0,
         };
-        // Hülle der transparenten Ebene (siehe RenderParams.trans_lo)
+        // Hülle der transparenten Ebene (siehe RenderParams.trans_lo):
+        // Host-Loop über alle Instanzen nur bei Szenenänderung oder neuer
+        // Maske; danach Cache. Pro Frame gespart: O(Instanzen) CPU-Arbeit.
         if (targets.transparent_mask != 0) {
-            var lo = [3]f32{ std.math.inf(f32), std.math.inf(f32), std.math.inf(f32) };
-            var hi = [3]f32{ -std.math.inf(f32), -std.math.inf(f32), -std.math.inf(f32) };
-            for (self.instances[0..self.instance_high]) |*inst| {
-                if (!inst.alive or inst.data.mask & targets.transparent_mask == 0) continue;
-                for (0..3) |a| {
-                    lo[a] = @min(lo[a], inst.data.bounds_min[a]);
-                    hi[a] = @max(hi[a], inst.data.bounds_max[a]);
+            if (self.trans_seq != self.scene_seq or self.trans_mask != targets.transparent_mask) {
+                var lo = [3]f32{ std.math.inf(f32), std.math.inf(f32), std.math.inf(f32) };
+                var hi = [3]f32{ -std.math.inf(f32), -std.math.inf(f32), -std.math.inf(f32) };
+                for (self.instances[0..self.instance_high]) |*inst| {
+                    if (!inst.alive or inst.data.mask & targets.transparent_mask == 0) continue;
+                    for (0..3) |a| {
+                        lo[a] = @min(lo[a], inst.data.bounds_min[a]);
+                        hi[a] = @max(hi[a], inst.data.bounds_max[a]);
+                    }
                 }
+                self.trans_lo = lo;
+                self.trans_hi = hi;
+                self.trans_mask = targets.transparent_mask;
+                self.trans_seq = self.scene_seq;
             }
-            params.trans_lo = lo;
-            params.trans_hi = hi;
+            params.trans_lo = self.trans_lo;
+            params.trans_hi = self.trans_hi;
         }
         // Indirekte Beleuchtung in halber Auflösung: eigener Durchgang und
         // kantenbewusstes Hochskalieren (braucht color, normal, albedo, hits).
@@ -2828,6 +2849,7 @@ pub const Context = struct {
         v.stat_h = 0;
         v.stat_mask = 0;
         v.stat_ok = false;
+        v.stat_logged = false;
     }
 
     /// Streamgeordnete Gerätekopie (kein Warten, keine CPU-GPU-Rückfrage).
