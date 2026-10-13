@@ -486,13 +486,13 @@ pub fn restTest(start_ns: i64) bool {
 /// Streaming policy and frame-time target. 0 FPS disables adaptation.
 export fn pyd_world_configure(px: f32, view_chunks: u32, target_fps: f32) i32 {
     root.bind();
-    if (!S.ready or view_chunks == 0 or view_chunks > 32768 or !std.math.isFinite(target_fps) or target_fps < 0) {
-        root.setError("Weltkonfiguration: Sichtweite 1..32768, FPS endlich und >= 0 erforderlich", .{});
+    if (!S.ready or view_chunks == 0 or !std.math.isFinite(target_fps) or target_fps < 0) {
+        root.setError("Weltkonfiguration: Sichtweite ab 1 Chunk (nur durch Terrain-Generation begrenzt), FPS endlich und >= 0 erforderlich", .{});
         return -1;
     }
     const config = api.WorldConfig{
         .voxel_pixels = px,
-        .view_distance = @floatFromInt(view_chunks * 16),
+        .view_distance = @as(f32, @floatCast(@as(f64, @floatFromInt(view_chunks)) * 16)),
         .memory_budget = S.wi.memory_budget - S.spectator_budget,
     };
     if (!req(pyrit.pyr_world_configure(@ptrCast(S.ctx), @ptrCast(S.world), &config), "Weltkonfiguration")) return -1;

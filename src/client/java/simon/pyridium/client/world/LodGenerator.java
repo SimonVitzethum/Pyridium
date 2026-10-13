@@ -491,7 +491,7 @@ public final class LodGenerator {
 	 * Liefert fehlende Knoten, grob vor fein, nah vor fern.
 	 */
 	private java.util.List<int[]> plan(double[] c) {
-		int log2 = (int)c[0], viewChunks = (int)c[2], top = (int)c[7];
+		int log2 = (int)c[0], top = (int)c[7];
 		double viewDist = c[3], refineK = c[4], yMin = c[5], yMax = c[6];
 		double[] cam = {c[8], c[9], c[10]};
 		java.util.List<int[]> todo = new java.util.ArrayList<>();
@@ -499,10 +499,20 @@ public final class LodGenerator {
 		int cx = (int)Math.floor(cam[0] / s), cz = (int)Math.floor(cam[2] / s);
 		int y0 = (int)Math.floor(yMin / s), y1 = (int)Math.floor((yMax - 1) / s);
 		java.util.ArrayDeque<int[]> stack = new java.util.ArrayDeque<>();
-		for (int z = cz - viewChunks; z <= cz + viewChunks; z++) {
-			for (int x = cx - viewChunks; x <= cx + viewChunks; x++) {
+		// Nur durch Terrain-Generation begrenzt: Seed-Radius aus der Sichtweite
+		// in Top-Einheiten statt dichtem Quadrat über viewChunks (O(n²) in der
+		// Sichtweite). Die Verfeinerung darunter erzeugt exakt die sichtbare Menge.
+		long rSeed = Math.min((long)Integer.MAX_VALUE / 2, (long)Math.ceil(viewDist / s) + 1);
+		for (long z = (long)cz - rSeed; z <= (long)cz + rSeed; z++) {
+			if (z < Integer.MIN_VALUE || z > Integer.MAX_VALUE) {
+				continue;
+			}
+			for (long x = (long)cx - rSeed; x <= (long)cx + rSeed; x++) {
+				if (x < Integer.MIN_VALUE || x > Integer.MAX_VALUE) {
+					continue;
+				}
 				for (int y = y0; y <= y1; y++) {
-					stack.push(new int[]{top, x, y, z});
+					stack.push(new int[]{top, (int)x, y, (int)z});
 				}
 			}
 		}

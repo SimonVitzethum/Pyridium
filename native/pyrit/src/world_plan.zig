@@ -239,13 +239,31 @@ pub const Plan = struct {
         const cz: i32 = @intFromFloat(@floor(cam[2] / s));
         const y0: i32 = @intFromFloat(@floor(@as(f64, @floatFromInt(self.cfg.y_min)) / s));
         const y1: i32 = @intFromFloat(@floor(@as(f64, @floatFromInt(self.cfg.y_max - 1)) / s));
-        const r: i32 = @intCast(self.cfg.view_chunks);
-        var z = cz - r;
-        while (z <= cz + r) : (z += 1) {
-            var x = cx - r;
-            while (x <= cx + r) : (x += 1) {
-                var y = y0;
-                while (y <= y1) : (y += 1) try self.visit(.{ .lod = top, .x = x, .y = y, .z = z }, cam);
+        // Nur durch Terrain-Generation begrenzt: Seed-Radius aus der Sichtweite
+        // in Top-Einheiten statt dichtem Quadrat über view_chunks (O(n²) in der
+        // Sichtweite). Die Verfeinerung darunter erzeugt exakt die sichtbare
+        // Menge; der Planeraufwand skaliert mit dem Ausgang, nicht mit dem
+        // angeforderten Radius. Seeds jenseits der Sichtweite entfallen (visit
+        // würde sie nach vergeblichem Anfassen verwerfen: unechte Bauanfragen).
+        const want: f64 = if (std.math.isFinite(self.cfg.view_distance) and self.cfg.view_distance > 0)
+            @ceil(self.cfg.view_distance / s) + 1
+        else
+            @floatFromInt(self.cfg.view_chunks);
+        const r_seed: i64 = @intFromFloat(@min(want, 2147483647.0));
+        const x0 = @max(@as(i64, cx) - r_seed, std.math.minInt(i32));
+        const x1 = @min(@as(i64, cx) + r_seed, std.math.maxInt(i32));
+        const z0 = @max(@as(i64, cz) - r_seed, std.math.minInt(i32));
+        const z1 = @min(@as(i64, cz) + r_seed, std.math.maxInt(i32));
+        var z = z0;
+        while (z <= z1) : (z += 1) {
+            var x = x0;
+            while (x <= x1) : (x += 1) {
+                var y: i32 = y0;
+                while (y <= y1) : (y += 1) {
+                    const k: Key = .{ .lod = top, .x = @intCast(x), .y = y, .z = @intCast(z) };
+                    if (self.distance(k, cam) > self.cfg.view_distance) continue;
+                    try self.visit(k, cam);
+                }
             }
         }
     }

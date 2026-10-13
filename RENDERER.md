@@ -280,7 +280,10 @@ der geplanten LOD-Einträge in dieser festen Kamera, nicht vollständige
 Vanilla-GPU-Worldgen oder das 165-FPS-Ziel. Die native Full-HD-Aufnahme zeigt
 Mobs, Ausrüstung, Items, Feuerball, Blocktexturen und Schatten.
 
-`pyridium.viewChunks` ist standardmäßig 1024, `pyridium.targetFps` 165. Minecrafts
+`pyridium.viewChunks` ist standardmäßig 1024. Beliebige Werte sind zulässig
+(Planer-Seeds skalieren mit der Sichtweite, nicht quadratisch damit); praktisch
+begrenzen nur Terrain-Generation (Durchsatz) und VRAM-Budget (Verfeinerung weicht
+statt Speicher zu wachsen). `pyridium.targetFps` 165. Minecrafts
 eigener FPS-Deckel wird bei Bedarf auf mindestens dieses Ziel angehoben
 (165 → 170 im 10er-Raster). `targetFps=0` deaktiviert diese Anpassung und die
 adaptive Auflösung und wählt ausdrücklich 100 % interne Renderauflösung; auch
