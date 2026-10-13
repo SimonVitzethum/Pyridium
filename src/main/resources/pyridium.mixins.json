@@ -6,7 +6,11 @@
 		"NoiseBasedChunkGeneratorAccess",
 		"NoiseBasedChunkGeneratorMixin",
 		"ChunkGeneratorMixin",
-		"ChunkStatusTasksMixin"
+		"ChunkStatusTasksMixin",
+		"HeightmapMixin",
+		"ChunkAccessDebugMixin",
+		"LevelChunkGpuMixin",
+		"ChunkMapSaveMixin"
 	],
 	"injectors": {
 		"defaultRequire": 1

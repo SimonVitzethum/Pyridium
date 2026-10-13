@@ -69,6 +69,14 @@ tasks.named("runClient") {
 	}
 }
 
+// Dedizierter Server fuer Worldgen-Messungen: -PpydServerJvm="-Dpyridium.genBench=64 ..."
+tasks.named("runServer") {
+	jvmArgs("--enable-native-access=ALL-UNNAMED")
+	if (project.hasProperty("pydServerJvm")) {
+		jvmArgs(project.property("pydServerJvm").toString().split(" "))
+	}
+}
+
 // ---- CUDA-Kernels der exakten Worldgen (Server-Seite) ----
 // nvcc -ptx mit Exaktheits-Flags (kein FMA-Zusammenziehen, IEEE-Division/Wurzel, keine
 // Denormal-Spuelung), damit die GPU bitgleich zu Vanilla rechnet. Die .cu-Quellen liegen zusaetzlich
@@ -102,8 +110,12 @@ tasks.register("compileCuda") {
 		try {
 			def futures = units.collect { f ->
 				pool.submit({
-					def cmd = [nvcc, "-ptx", "-arch=compute_75", "-std=c++17", "-fmad=false", "-prec-div=true", "-prec-sqrt=true", "-ftz=false",
-						"-I" + cudaSrc, "-o", new File(cudaOut, (f.name - ".cu") + ".ptx").toString(), f.toString()].collect { it.toString() }
+					// -Pcubin[=75,120]: Fatbin (PTX compute_75 + fertiger SASS je Architektur) statt reinem PTX. Der Treiber muss dann nicht beim
+					// ersten Laden jeden Kernel uebersetzen (JIT: ~30 s je grossem Modul, nur einmal je PTX-Hash, aber bei jeder Neuinstallation).
+					def sasm = project.hasProperty("cubin") ? (project.property("cubin").toString() == "true" ? "75,80,86,89,90,120" : project.property("cubin").toString()).split(",") : null
+					def arch = sasm == null ? ["-ptx", "-arch=compute_75"] : (["-fatbin", "-gencode", "arch=compute_75,code=compute_75"] + sasm.findAll { it != "75" || true }.collectMany { a -> ["-gencode", "arch=compute_${a},code=sm_${a}"] })
+					def cmd = ([nvcc] + arch + ["-std=c++17", "-fmad=false", "-prec-div=true", "-prec-sqrt=true", "-ftz=false",
+						"-I" + cudaSrc, "-o", new File(cudaOut, (f.name - ".cu") + ".ptx").toString(), f.toString()]).collect { it.toString() }
 					def proc = new ProcessBuilder(cmd as List<String>).redirectErrorStream(true).start()
 					def log = proc.inputStream.text
 					proc.waitFor()
@@ -120,4 +132,48 @@ tasks.register("compileCuda") {
 processResources {
 	dependsOn("compileCuda")
 	from(cudaOut) { into "assets/pyridium/shaders/ptx" }
+}
+
+// ---- Strukturgenerierung: Testwerkzeug (Vanilla-Vergleich, nur Entwicklung) ----
+// ./gradlew structHarness -Pmode=place -Pseed=4711 -Pradius=300   (Ausgaben in build/scratch)
+tasks.register("structHarness", JavaExec) {
+	dependsOn("classes", "compileCuda")
+	classpath = sourceSets.main.output.classesDirs + configurations.runtimeClasspath
+	mainClass = "simon.pyridium.worldgen.structures.tools.StructureHarness"
+	workingDir = projectDir
+	jvmArgs("--enable-native-access=ALL-UNNAMED", "-Xmx3g")
+	["mode", "seed", "radius", "count", "structure", "out", "slots", "capStart", "capPieces", "dim", "module", "sets", "real", "pick", "nbt", "strict"].each { k ->
+		if (project.hasProperty(k)) systemProperty(k, project.property(k).toString())
+	}
+}
+
+// ---- Datenpaket: Vanilla-Bauanweisungen -> mitgelieferte Daten (Offline-Werkzeug, Ausgabe wird committet) ----
+tasks.register("exportPack", JavaExec) {
+	dependsOn("classes")
+	classpath = sourceSets.main.output.classesDirs + configurations.runtimeClasspath
+	mainClass = "simon.pyridium.worldgen.structures.PackExporter"
+	workingDir = projectDir
+}
+
+// Nur ein GPU-Lauf zur Zeit (8 GB VRAM, mehrere Agenten): jeder JavaExec (Client, Server, Harnesse, Benches) nimmt vor dem Start die
+// gemeinsame Sperrdatei im Haupt-Checkout (gilt auch aus Worktrees) und gibt sie danach wieder frei. Haelt der Aufrufer sie schon
+// (tools/check_renderer.sh uebergibt -PgpuLockHeld), wird nicht doppelt gesperrt.
+def gpuCommonGit = ["git", "-C", projectDir.absolutePath, "rev-parse", "--path-format=absolute", "--git-common-dir"].execute().text.trim()
+def gpuLockFile = new File(gpuCommonGit ? new File(gpuCommonGit).parentFile : projectDir, "build/gpu-test.lock")
+def gpuHeld = []
+def gpuRelease = tasks.register("gpuLockRelease") {
+	doLast {
+		gpuHeld.each { h -> h[1].release(); h[0].close() }
+		gpuHeld.clear()
+	}
+}
+tasks.withType(JavaExec).configureEach { t ->
+	if (project.hasProperty("gpuLockHeld")) return
+	t.doFirst {
+		gpuLockFile.parentFile.mkdirs()
+		def ch = java.nio.channels.FileChannel.open(gpuLockFile.toPath(), java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.WRITE)
+		logger.lifecycle("GPU-Sperre: warte auf andere GPU-Laeufe ...")
+		gpuHeld << [ch, ch.lock()]
+	}
+	t.finalizedBy(gpuRelease)
 }
