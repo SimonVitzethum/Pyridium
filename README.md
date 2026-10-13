@@ -2,6 +2,17 @@
 
 A Fabric mod that replaces Minecraft's rasterizer with a **CUDA/OptiX path tracer** and moves **world generation to the GPU**. No OpenGL/Vulkan rasterization in the world path — primary visibility, direct lighting, diffuse paths and reflections share one CUDA/OptiX tracer over a HashDAG voxel world with adaptive LOD up to 1024 chunks view distance.
 
+## Scaling: T(n) = O(1) + c₁·O(log n) + c₂·O(log log n)
+
+n = view distance in chunks (radius). Frame time is essentially constant in n, with a logarithmic correction:
+
+- **O(1) — shading.** PBR, GI shade and post cost pixels × rays, independent of world size. This ~40 ms constant dwarfs the logarithmic terms (~1 ms).
+- **c₁·O(log n) — per-frame IAS refit + instance kernel.** Screen-space-error LOD doubles chunk size per level with distance, so each level contributes O(1) entries and the level count is ≈ log₂ n (9 levels ≈ 36k visible entries at n = 1024).
+- **c₂·O(log log n) — BVH traversal.** OptiX traverses those O(log n) instances logarithmically; DAG walks per hit are depth-bounded, i.e. O(1).
+- **O(log n) one-time — streaming/buildup**, amortized to ~0 in steady state. VRAM is O(log n), O(1) under the memory budget (distant quality yields instead of memory growing).
+
+The punchline: doubling view distance adds *one* coarse LOD level (~4k cheap entries, ~1–2 % frame time). Without LOD it would be O(n²) in area / O(n³) in volume — exactly the catastrophe the LOD removes. Constants beat complexity class here: 40 ms O(1) vs ~1 ms O(log n).
+
 ## How it works
 
 - **Native core (`native/pyrit`, Zig):** builds `libpyridium.so`. OptiX uses the RT cores for the hardware BVH; exact HashDAG hits and foliage alpha stay custom GPU intersection programs. A replay wavefront runs unmodified CUDA shading while OptiX resolves collected rays.
