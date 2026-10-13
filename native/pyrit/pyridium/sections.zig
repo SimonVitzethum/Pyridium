@@ -7,6 +7,7 @@
 
 const std = @import("std");
 const pyrit = @import("pyrit");
+const oslib = pyrit.oslib;
 const cuda = pyrit.cuda;
 const t = @import("types.zig");
 const root = @import("root.zig");
@@ -18,7 +19,7 @@ const tomb: u64 = std.math.maxInt(u64);
 const slot_bytes: usize = t.slot_bytes;
 
 pub const Store = struct {
-    mutex: std.c.pthread_mutex_t = std.c.PTHREAD_MUTEX_INITIALIZER,
+    mutex: oslib.Mutex = .{},
     cap: u32 = 0,
     keys: []u64 = &.{},
     vals: []u32 = &.{},
@@ -51,10 +52,10 @@ pub const Store = struct {
 pub var S: Store = .{};
 
 fn lock() void {
-    _ = std.c.pthread_mutex_lock(&S.mutex);
+    S.mutex.lock();
 }
 fn unlock() void {
-    _ = std.c.pthread_mutex_unlock(&S.mutex);
+    S.mutex.unlock();
 }
 
 fn colKey(cx: i32, cz: i32) u64 {

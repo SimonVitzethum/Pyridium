@@ -17,11 +17,13 @@
 //! Grafik-API. Gerendert wird weiter nur in CUDA.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const build_options = @import("build_options");
 const cuda = @import("cuda.zig");
 const diag = @import("diag.zig");
 const types = @import("pyrit_device").types;
 const Context = @import("context.zig").Context;
+const oslib = @import("oslib.zig");
 
 const Error = diag.Error;
 const fail = diag.fail;
@@ -134,7 +136,7 @@ pub const DlssG = if (available) DlssGVk else struct {
 };
 
 const DlssGVk = struct {
-    lib: std.DynLib,
+    lib: oslib.DynLib,
     gipa: c.PFN_vkGetInstanceProcAddr,
     vk: Vk = .{},
     instance: c.VkInstance = null,
@@ -173,7 +175,7 @@ const DlssGVk = struct {
         if (!available) return fail(error.NotFound, "DLSS Frame Generation braucht einen Build mit -Ddlss-sdk", .{});
         const self = ctx.gpa.create(DlssGVk) catch return fail(error.OutOfMemory, "Host-Speicher", .{});
         errdefer ctx.gpa.destroy(self);
-        var lib = std.DynLib.open("libvulkan.so.1") catch return fail(error.NotFound, "DLSS Frame Generation: libvulkan.so.1 nicht gefunden", .{});
+        var lib = oslib.DynLib.open(if (builtin.os.tag == .windows) "vulkan-1.dll" else "libvulkan.so.1") catch return fail(error.NotFound, "DLSS Frame Generation: Vulkan-Lader nicht gefunden", .{});
         const gipa = lib.lookup(c.PFN_vkGetInstanceProcAddr, "vkGetInstanceProcAddr") orelse return fail(error.NotFound, "vkGetInstanceProcAddr fehlt", .{});
         self.* = .{ .lib = lib, .gipa = gipa };
         errdefer self.destroyVulkan();

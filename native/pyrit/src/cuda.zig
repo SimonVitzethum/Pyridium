@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const oslib = @import("oslib.zig");
 
 pub const CUresult = c_int;
 pub const CUdevice = c_int;
@@ -151,7 +152,7 @@ pub const CU_JIT_ERROR_LOG_BUFFER_SIZE_BYTES: c_int = 6;
 
 /// Funktionszeiger der Treiber-API; Feldnamen = exportierte Symbolnamen.
 pub const Driver = struct {
-    lib: std.DynLib,
+    lib: oslib.DynLib,
     cuInit: *const fn (c_uint) callconv(.c) CUresult,
     cuDriverGetVersion: *const fn (*c_int) callconv(.c) CUresult,
     cuGetErrorString: *const fn (CUresult, *?[*:0]const u8) callconv(.c) CUresult,
@@ -240,16 +241,16 @@ pub const Driver = struct {
     }
 };
 
-fn openFirst(names: []const []const u8, root: ?[]const u8) ?std.DynLib {
+fn openFirst(names: []const []const u8, root: ?[]const u8) ?oslib.DynLib {
     var buf: [1024]u8 = undefined;
     for (names) |name| {
         const path = if (root) |r| std.fmt.bufPrint(&buf, "{s}/lib64/{s}", .{ r, name }) catch continue else name;
-        if (std.DynLib.open(path)) |lib| return lib else |_| {}
+        if (oslib.DynLib.open(path)) |lib| return lib else |_| {}
     }
     return null;
 }
 
-fn resolve(comptime T: type, lib: *std.DynLib) error{NotFound}!T {
+fn resolve(comptime T: type, lib: *oslib.DynLib) error{NotFound}!T {
     var out: T = undefined;
     out.lib = lib.*;
     inline for (std.meta.fields(T)) |f| {

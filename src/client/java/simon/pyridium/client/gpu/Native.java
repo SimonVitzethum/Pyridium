@@ -14,12 +14,14 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 
 /**
- * FFM-Anbindung an libpyridium.so (native/pyrit/pyridium). Zeiger werden als
+ * FFM-Anbindung an libpyridium.so / pyridium.dll (native/pyrit/pyridium). Zeiger werden als
  * long übergeben (x86-64: gleiche Aufrufkonvention wie Adressen).
  */
 public final class Native {
 	private static final ValueLayout.OfLong L = ValueLayout.JAVA_LONG;
 	private static final ValueLayout.OfInt I = ValueLayout.JAVA_INT;
+	/** true auf Windows (pyridium.dll statt libpyridium.so, SDL- statt Wayland-Ausgabe). */
+	public static final boolean WINDOWS = System.getProperty("os.name", "").toLowerCase(java.util.Locale.ROOT).contains("win");
 
     private static SymbolLookup lib;
     private static MethodHandle hModelCreateVoxels, hModelCreate, hModelDestroy, hModelsFrame, hMaterialFaces, hWorldFeatures;
@@ -116,25 +118,31 @@ public final class Native {
         } catch (Throwable t) { throw wrap(t); }
     }
 
-	/** Entwicklung: -Dpyridium.nativeDir; sonst aus dem Jar entpacken. */
+	/** Entwicklung: -Dpyridium.nativeDir; sonst aus dem Jar entpacken. OS-Weiche: .dll / windows-x86_64. */
 	private static Path locate() {
+		String file = WINDOWS ? "pyridium.dll" : "libpyridium.so";
+		String jarPath = WINDOWS ? "/natives/windows-x86_64/pyridium.dll" : "/natives/linux-x86_64/libpyridium.so";
 		String dir = System.getProperty("pyridium.nativeDir");
 		if (dir != null) {
-			Path p = Path.of(dir, "libpyridium.so");
+			Path p = Path.of(dir, file);
 			if (Files.isRegularFile(p)) {
 				return p;
 			}
-		}
-		try (InputStream in = Native.class.getResourceAsStream("/natives/linux-x86_64/libpyridium.so")) {
-			if (in == null) {
-				throw new IllegalStateException("libpyridium.so weder in pyridium.nativeDir noch im Jar");
+			Path alt = Path.of(dir, "bin", file);
+			if (Files.isRegularFile(alt)) {
+				return alt;
 			}
-			Path tmp = Files.createTempFile("libpyridium", ".so");
+		}
+		try (InputStream in = Native.class.getResourceAsStream(jarPath)) {
+			if (in == null) {
+				throw new IllegalStateException(file + " weder in pyridium.nativeDir noch im Jar (" + jarPath + ")");
+			}
+			Path tmp = Files.createTempFile("libpyridium", WINDOWS ? ".dll" : ".so");
 			Files.copy(in, tmp, StandardCopyOption.REPLACE_EXISTING);
 			tmp.toFile().deleteOnExit();
 			return tmp;
 		} catch (IOException e) {
-			throw new IllegalStateException("libpyridium.so nicht entpackbar", e);
+			throw new IllegalStateException(file + " nicht entpackbar", e);
 		}
 	}
 

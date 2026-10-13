@@ -9,6 +9,7 @@
 //!   Zugriff hat.
 
 const std = @import("std");
+const oslib = @import("oslib.zig");
 const types = @import("pyrit_device").types;
 const optix = @import("optix.zig");
 const cuda = @import("cuda.zig");
@@ -178,13 +179,11 @@ pub const Rt = struct {
             .pipelineLaunchParamsSizeInBytes = @sizeOf(types.RtParams),
             .usesPrimitiveTypeFlags = optix.primitive_type_flags_custom,
         };
-        var ts0: std.c.timespec = undefined;
-        _ = std.c.clock_gettime(.MONOTONIC, &ts0);
+        const ts0 = oslib.nanoTimestamp();
         const r = ft.optixModuleCreate(self.ctx, &mco, &pco, rt_ptx.ptr, rt_ptx.len, &log, &log_size, &self.module);
         if (r != optix.success) return fail(error.Compile, "OptiX-Modul: {s}\n{s}", .{ self.api.errorString(r), log[0..@min(log_size, log.len)] });
-        var ts1: std.c.timespec = undefined;
-        _ = std.c.clock_gettime(.MONOTONIC, &ts1);
-        const secs = @as(f64, @floatFromInt(ts1.sec - ts0.sec)) + @as(f64, @floatFromInt(ts1.nsec - ts0.nsec)) / 1e9;
+        const ts1 = oslib.nanoTimestamp();
+        const secs = @as(f64, @floatFromInt(ts1 - ts0)) / 1e9;
         if (std.c.getenv("PYRIT_OPTIX_TIMING") != null) std.debug.print("OptiX-Modul ({d} KB PTX) übersetzt in {d:.2} s\n", .{ rt_ptx.len >> 10, secs });
 
         const descs = [4]optix.ProgramGroupDesc{

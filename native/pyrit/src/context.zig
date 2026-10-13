@@ -9,6 +9,7 @@
 const palette_dev = @import("pyrit_device").palette;
 const cache = @import("pyrit_device").cache;
 const std = @import("std");
+const oslib = @import("oslib.zig");
 const types = @import("pyrit_device").types;
 const api = @import("api.zig");
 const cuda = @import("cuda.zig");
@@ -1238,9 +1239,7 @@ pub const Context = struct {
     /// Läuft auf dem Hintergrund-Stream (b muss dort gebaut sein); der
     /// Render-Stream wartet per Event, bevor er die neuen Chunks sieht.
     fn nowNs() u64 {
-        var ts: std.c.timespec = undefined;
-        _ = std.c.clock_gettime(.MONOTONIC, &ts);
-        return @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
+        return oslib.nanoTimestamp();
     }
 
     /// Arena zu drei Vierteln voll: alte Wege sind Müll, den nur ein Neubau

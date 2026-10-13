@@ -29,19 +29,27 @@ java {
 	toolchain { languageVersion = JavaLanguageVersion.of(25) }
 }
 
-// ---- Native Seite (Zig): Pyrit + libpyridium.so ----
+// ---- Native Seite (Zig): Pyrit + libpyridium.so / pyridium.dll ----
 // native/pyrit ist ein Schnappschuss von ~/Schreibtisch/Pyrit (dort wird nichts veraendert).
 // CUDA-only by default. DLSS (including Vulkan frame-generation interop)
 // is linked only when explicitly requested with -PdlssSdk=<path>.
+// Windows: Zig baut mit dem eingebetteten MinGW (kein MSVC nötig), Ausgabe
+// pyridium.dll unter natives/windows-x86_64. nvcc über PATH, CUDA_PATH oder
+// das Standard-Toolkit-Verzeichnis.
+def isWindows = System.getProperty("os.name").toLowerCase(java.util.Locale.ROOT).contains("windows")
+def nativeLib = isWindows ? "pyridium.dll" : "libpyridium.so"
+def nativesDir = isWindows ? "natives/windows-x86_64" : "natives/linux-x86_64"
 def nativeSrc = file("native/pyrit")
 def nativeOut = file("$buildDir/native")
 def dlssSdk = project.findProperty("dlssSdk")
 tasks.register("buildNative", Exec) {
 	inputs.property("dlssSdk", dlssSdk ?: "disabled")
+	inputs.property("os", isWindows ? "windows" : "linux")
 	inputs.files(fileTree(nativeSrc) { exclude '.zig-cache/**', 'zig-out/**' }).withPropertyName("src").skipWhenEmpty(false)
-	outputs.file("$nativeOut/libpyridium.so")
+	outputs.file(isWindows ? "$nativeOut/bin/$nativeLib" : "$nativeOut/$nativeLib")
 	workingDir nativeSrc
 	def cmd = ["zig", "build", "pyridium", "--release=fast", "--prefix", nativeOut.absolutePath, "--prefix-lib-dir", nativeOut.absolutePath]
+	if (isWindows) cmd.add("-Dtarget=x86_64-windows-gnu")
 	if (dlssSdk != null) cmd.add("-Ddlss-sdk=" + dlssSdk)
 	commandLine cmd
 }
@@ -50,8 +58,10 @@ processResources {
     filesMatching("fabric.mod.json") { expand(version: project.version) }
 	dependsOn("buildNative")
 	from(nativeOut) {
-		include "libpyridium.so"
-		into "natives/linux-x86_64"
+		include "**/" + nativeLib
+		eachFile { it.path = nativeLib }
+		includeEmptyDirs = false
+		into nativesDir
 	}
 }
 tasks.named("runClient") {
@@ -84,13 +94,38 @@ tasks.named("runServer") {
 def cudaSrc = file("src/main/resources/assets/pyridium/cuda")
 def cudaOut = file("$buildDir/cuda")
 def findExecutable = { String name ->
+	def names = [name]
+	if (isWindows) names.add(name + ".exe")
 	for (dir in (System.getenv("PATH") ?: "").split(File.pathSeparator)) {
-		def f = new File(dir, name)
-		if (f.canExecute()) return f.absolutePath
+		for (n in names) {
+			def f = new File(dir, n)
+			if (f.canExecute()) return f.absolutePath
+		}
 	}
-	def home = System.getenv("CUDA_PATH")
-	for (p in [home ? "$home/bin/$name" : null, "/opt/cuda/bin/$name", "/usr/local/cuda/bin/$name"]) {
-		if (p != null && new File(p).canExecute()) return p
+	def cudaPath = System.getenv("CUDA_PATH")
+	if (cudaPath) {
+		for (n in names) {
+			def f = new File(new File(cudaPath, "bin"), n)
+			if (f.canExecute()) return f.absolutePath
+		}
+	}
+	if (isWindows) {
+		def kit = new File("C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA")
+		if (kit.isDirectory()) {
+			for (v in kit.listFiles().toList().sort().reverse()) {
+				for (n in names) {
+					def f = new File(v, "bin/" + n)
+					if (f.canExecute()) return f.absolutePath
+				}
+			}
+		}
+	} else {
+		for (dir in ["/opt/cuda/bin", "/usr/local/cuda/bin"]) {
+			for (n in names) {
+				def f = new File(dir, n)
+				if (f.canExecute()) return f.absolutePath
+			}
+		}
 	}
 	return null
 }
@@ -158,7 +193,13 @@ tasks.register("exportPack", JavaExec) {
 // Nur ein GPU-Lauf zur Zeit (8 GB VRAM, mehrere Agenten): jeder JavaExec (Client, Server, Harnesse, Benches) nimmt vor dem Start die
 // gemeinsame Sperrdatei im Haupt-Checkout (gilt auch aus Worktrees) und gibt sie danach wieder frei. Haelt der Aufrufer sie schon
 // (tools/check_renderer.sh uebergibt -PgpuLockHeld), wird nicht doppelt gesperrt.
-def gpuCommonGit = ["git", "-C", projectDir.absolutePath, "rev-parse", "--path-format=absolute", "--git-common-dir"].execute().text.trim()
+// Ohne git (z. B. Quell-Export ohne Repo) liegt die Sperre ersatzweise im Projekt.
+def gpuCommonGit = ""
+try {
+	gpuCommonGit = ["git", "-C", projectDir.absolutePath, "rev-parse", "--path-format=absolute", "--git-common-dir"].execute().text.trim()
+} catch (Exception ignored) {
+	logger.lifecycle("git nicht verfügbar – GPU-Sperre liegt im Projekt (kein Worktree-Abgleich)")
+}
 def gpuLockFile = new File(gpuCommonGit ? new File(gpuCommonGit).parentFile : projectDir, "build/gpu-test.lock")
 def gpuHeld = []
 def gpuRelease = tasks.register("gpuLockRelease") {

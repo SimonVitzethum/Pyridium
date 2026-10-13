@@ -8,6 +8,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const oslib = @import("oslib.zig");
 const cuda = @import("cuda.zig");
 
 pub const abi_version: c_int = 118;
@@ -316,15 +317,15 @@ pub const FunctionTable = extern struct {
 const QueryFn = *const fn (abi_id: c_int, num_options: c_uint, option_keys: ?*anyopaque, option_values: ?*anyopaque, table: *anyopaque, table_size: usize) callconv(.c) Result;
 
 pub const Api = struct {
-    lib: std.DynLib,
+    lib: oslib.DynLib,
     ft: FunctionTable,
 
     /// Lädt libnvoptix aus dem Treiber; error.NotFound, wenn nicht vorhanden
     /// oder der Treiber ABI 118 nicht anbietet.
     pub fn load() error{NotFound}!Api {
         const names: []const []const u8 = if (builtin.os.tag == .windows) &.{"nvoptix.dll"} else &.{ "libnvoptix.so.1", "libnvoptix.so" };
-        var lib: std.DynLib = for (names) |n| {
-            if (std.DynLib.open(n)) |l| break l else |_| {}
+        var lib: oslib.DynLib = for (names) |n| {
+            if (oslib.DynLib.open(n)) |l| break l else |_| {}
         } else return error.NotFound;
         errdefer lib.close();
         const query = lib.lookup(QueryFn, "optixQueryFunctionTable") orelse return error.NotFound;

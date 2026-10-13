@@ -12,6 +12,7 @@ const cuda = pyrit.cuda;
 const root = @import("root.zig");
 const sections = @import("sections.zig");
 const t = @import("types.zig");
+const oslib = pyrit.oslib;
 const quality = @import("quality.zig");
 const spectator = @import("spectator.zig");
 const Budget = @import("test_budget").Budget;
@@ -167,7 +168,7 @@ var d_known: u64 = 0;
 var d_known_len: usize = 0;
 var h_keys: std.ArrayList(pyr.types.ChunkKey) = .empty;
 var h_known: std.ArrayList(u32) = .empty;
-var generate_mutex: std.c.pthread_mutex_t = std.c.PTHREAD_MUTEX_INITIALIZER;
+var generate_mutex: oslib.Mutex = .{};
 
 /// Generator (Pyrits Arbeiter-Thread): erst das Rückfall-Gelände für alle
 /// Chunks, dann überschreibt der Sektions-Kern die Chunks, die ganz in
@@ -175,8 +176,8 @@ var generate_mutex: std.c.pthread_mutex_t = std.c.PTHREAD_MUTEX_INITIALIZER;
 fn generate(user: ?*anyopaque, params: *const types.WorldGenParams, stream: ?*anyopaque) callconv(.c) void {
     // Both streamers use the same section tables and staging buffers. Do not
     // duplicate worldgen or race the reusable host/device scratch storage.
-    _ = std.c.pthread_mutex_lock(&generate_mutex);
-    defer _ = std.c.pthread_mutex_unlock(&generate_mutex);
+    generate_mutex.lock();
+    defer generate_mutex.unlock();
     const cache_only = user == @as(?*anyopaque, @ptrCast(&S.spectator_world));
     const n = params.count;
     if (n == 0) return;
@@ -522,9 +523,7 @@ export fn pyd_world_set_mode(mode: u32) void {
 }
 
 pub fn nowMs() i64 {
-    var ts: std.c.timespec = undefined;
-    _ = std.c.clock_gettime(.MONOTONIC, &ts);
-    return @as(i64, ts.sec) * 1000 + @divTrunc(@as(i64, ts.nsec), 1000000);
+    return oslib.milliTimestamp();
 }
 
 fn origin(pos: [3]f64) [3]f64 {

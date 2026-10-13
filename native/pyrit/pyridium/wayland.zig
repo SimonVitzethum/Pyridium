@@ -7,6 +7,7 @@
 //! Puffer, den der Compositor anzeigt.
 
 const std = @import("std");
+const oslib = @import("pyrit").oslib;
 
 pub const Proxy = opaque {};
 pub const Display = opaque {};
@@ -30,7 +31,7 @@ pub const Interface = extern struct {
 pub const marshal_flag_destroy: u32 = 1;
 
 pub const Client = struct {
-    lib: std.DynLib,
+    lib: oslib.DynLib,
 
     display_connect: *const fn (?[*:0]const u8) callconv(.c) ?*Display,
     display_disconnect: *const fn (*Display) callconv(.c) void,
@@ -66,7 +67,7 @@ pub const Client = struct {
     callback: *const Interface,
 
     pub fn load() !Client {
-        var lib = std.DynLib.open("libwayland-client.so.0") catch return error.NoWayland;
+        var lib = oslib.DynLib.open("libwayland-client.so.0") catch return error.NoWayland;
         errdefer lib.close();
         var c: Client = undefined;
         c.lib = lib;

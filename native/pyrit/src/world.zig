@@ -10,6 +10,7 @@
 //! Auf dem Host liegen nur Chunk-Schlüssel und Handles; Voxel sehen ihn nie.
 
 const std = @import("std");
+const oslib = @import("oslib.zig");
 const types = @import("pyrit_device").types;
 const api = @import("api.zig");
 const cuda = @import("cuda.zig");
@@ -130,8 +131,8 @@ pub const World = struct {
 
     // Auftrag an den Arbeiter (ein Batch zur Zeit)
     thread: ?std.Thread = null,
-    mutex: std.c.pthread_mutex_t = std.c.PTHREAD_MUTEX_INITIALIZER,
-    cond: std.c.pthread_cond_t = std.c.PTHREAD_COND_INITIALIZER,
+    mutex: oslib.Mutex = .{},
+    cond: oslib.Cond = .{},
     quit: bool = false,
     job_state: enum { idle, submitted, done } = .idle,
     /// nur Hauptthread: kein Auftrag unterwegs
@@ -302,10 +303,10 @@ pub const World = struct {
 
     pub fn destroy(self: *World) void {
         if (self.thread) |t| {
-            _ = std.c.pthread_mutex_lock(&self.mutex);
+            self.mutex.lock();
             self.quit = true;
-            _ = std.c.pthread_cond_broadcast(&self.cond);
-            _ = std.c.pthread_mutex_unlock(&self.mutex);
+            self.cond.broadcast();
+            self.mutex.unlock();
             t.join();
             self.thread = null;
         }
@@ -614,9 +615,7 @@ pub const World = struct {
     /// Erzeugen und Bauen laufen auf einem Hintergrund-Thread und -Stream; der
     /// Aufrufer wartet nie auf die GPU (außer mit world_sync).
     fn tick() i64 {
-        var ts: std.c.timespec = undefined;
-        _ = std.c.clock_gettime(.MONOTONIC, &ts);
-        return @as(i64, ts.sec) * 1_000_000_000 + ts.nsec;
+        return @as(i64, @intCast(oslib.nanoTimestamp()));
     }
 
     fn lap(self: *World, slot: usize, t0: *i64) void {
@@ -783,9 +782,9 @@ pub const World = struct {
     pub fn wait(self: *World, camera: [3]f64) Error!void {
         if (self.job_idle) return;
         if (self.thread != null) {
-            _ = std.c.pthread_mutex_lock(&self.mutex);
-            while (self.job_state != .done) _ = std.c.pthread_cond_wait(&self.cond, &self.mutex);
-            _ = std.c.pthread_mutex_unlock(&self.mutex);
+            self.mutex.lock();
+            while (self.job_state != .done) self.cond.wait(&self.mutex);
+            self.mutex.unlock();
         }
         try self.finishJob();
         try oom(self.plan.collect(camera));
@@ -815,18 +814,18 @@ pub const World = struct {
         self.job_count = @intCast(k);
         self.job_idle = false;
         if (self.thread != null) {
-            _ = std.c.pthread_mutex_lock(&self.mutex);
+            self.mutex.lock();
             self.job_state = .submitted;
-            _ = std.c.pthread_cond_broadcast(&self.cond);
-            _ = std.c.pthread_mutex_unlock(&self.mutex);
+            self.cond.broadcast();
+            self.mutex.unlock();
         } else self.job_state = .submitted;
     }
 
     fn pollJob(self: *World) bool {
         if (self.job_idle) return false;
         if (self.thread == null) return self.job_state == .done;
-        _ = std.c.pthread_mutex_lock(&self.mutex);
-        defer _ = std.c.pthread_mutex_unlock(&self.mutex);
+        self.mutex.lock();
+        defer self.mutex.unlock();
         return self.job_state == .done;
     }
 
@@ -834,16 +833,16 @@ pub const World = struct {
         self.ctx.enter() catch {};
         defer self.ctx.leave();
         while (true) {
-            _ = std.c.pthread_mutex_lock(&self.mutex);
-            while (self.job_state != .submitted and !self.quit) _ = std.c.pthread_cond_wait(&self.cond, &self.mutex);
+            self.mutex.lock();
+            while (self.job_state != .submitted and !self.quit) self.cond.wait(&self.mutex);
             const quit = self.quit;
-            _ = std.c.pthread_mutex_unlock(&self.mutex);
+            self.mutex.unlock();
             if (quit) return;
             self.gpuWork();
-            _ = std.c.pthread_mutex_lock(&self.mutex);
+            self.mutex.lock();
             self.job_state = .done;
-            _ = std.c.pthread_cond_broadcast(&self.cond);
-            _ = std.c.pthread_mutex_unlock(&self.mutex);
+            self.cond.broadcast();
+            self.mutex.unlock();
         }
     }
 
@@ -1089,9 +1088,9 @@ pub const World = struct {
         const ctx = self.ctx;
         const k = self.job_count;
         self.job_idle = true;
-        _ = std.c.pthread_mutex_lock(&self.mutex);
+        self.mutex.lock();
         self.job_state = .idle;
-        _ = std.c.pthread_mutex_unlock(&self.mutex);
+        self.mutex.unlock();
         if (self.job_error) |err| {
             // Chunks bleiben angefragt und werden später erneut versucht
             for (self.requests.items) |key| {

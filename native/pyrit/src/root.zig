@@ -9,6 +9,7 @@ pub const dag_builder = @import("dag_builder.zig");
 pub const context = @import("context.zig");
 pub const pack = @import("pack.zig");
 pub const cuda = @import("cuda.zig");
+pub const oslib = @import("oslib.zig");
 pub const xform = @import("xform.zig");
 pub const rt_prims = @import("rt_prims.zig");
 pub const gpu_build = @import("gpu_build.zig");

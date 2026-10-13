@@ -9,9 +9,11 @@
 //! Alle Funktionen werden aus Java (FFM) auf dem Render-Thread gerufen.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const pyrit = @import("pyrit");
 const cuda = pyrit.cuda;
 const t = @import("types.zig");
+const oslib = pyrit.oslib;
 const wl = @import("wayland.zig");
 pub const world = @import("world.zig");
 pub const sections = @import("sections.zig");
@@ -32,7 +34,7 @@ comptime {
 // ---------------------------------------------------------------------------
 
 const Extra = struct {
-    lib: std.DynLib,
+    lib: oslib.DynLib,
     cuMemHostRegister_v2: *const fn (?*anyopaque, usize, c_uint) callconv(.c) cuda.CUresult,
     cuMemHostUnregister: *const fn (?*anyopaque) callconv(.c) cuda.CUresult,
     cuMemHostGetDevicePointer_v2: *const fn (*cuda.CUdeviceptr, ?*anyopaque, c_uint) callconv(.c) cuda.CUresult,
@@ -88,8 +90,13 @@ pub fn bind() void {
     }
 }
 
+/// CUDA-Treiberbibliothek je OS (CUDA ist überall dynamisch geladen).
+fn cudaLibName() []const u8 {
+    return if (builtin.os.tag == .windows) "nvcuda.dll" else "libcuda.so.1";
+}
+
 fn loadExtra() !Extra {
-    var lib = std.DynLib.open("libcuda.so.1") catch return error.NotFound;
+    var lib = oslib.DynLib.open(cudaLibName()) catch return error.NotFound;
     var e: Extra = undefined;
     e.lib = lib;
     inline for (std.meta.fields(Extra)) |f| {
@@ -100,7 +107,7 @@ fn loadExtra() !Extra {
 }
 
 fn loadCtxFlags() ?*const fn (cuda.CUdevice, c_uint) callconv(.c) cuda.CUresult {
-    var lib = std.DynLib.open("libcuda.so.1") catch return null;
+    var lib = oslib.DynLib.open(cudaLibName()) catch return null;
     return lib.lookup(*const fn (cuda.CUdevice, c_uint) callconv(.c) cuda.CUresult, "cuDevicePrimaryCtxSetFlags_v2");
 }
 
@@ -408,6 +415,10 @@ fn pump(timeout_ms: i32) void {
 /// display/surface: wl_display* und wl_surface* aus SDL
 export fn pyd_present_init(display: ?*anyopaque, surface: ?*anyopaque) i32 {
     bind();
+    // Windows: kein Wayland-shm-Pfad. Die Ausgabe läuft über die
+    // SDL-Fensteroberfläche auf Java-Seite (PydSurface, reiner Software-Blit);
+    // nativ gibt es hier nichts zu initialisieren.
+    if (comptime builtin.os.tag == .windows) return 0;
     if (O.ready) return 0;
     O.c = wl.Client.load() catch {
         setError("libwayland-client nicht ladbar", .{});
@@ -523,6 +534,12 @@ fn commitPending() void {
 
 export fn pyd_present(src: u64, sw: u32, sh: u32, dw: u32, dh: u32, vsync: i32) i32 {
     bind();
+    // Windows: Ausgabe per SDL-Oberfläche auf Java-Seite; dieser
+    // Wayland-shm-Pfad existiert dort nicht.
+    if (comptime builtin.os.tag == .windows) {
+        setError("Anzeige auf Windows nur über SDL-Oberfläche (Java)", .{});
+        return -1;
+    }
     if (!O.ready or dw == 0 or dh == 0) return -1;
     resize(dw, dh) catch |e| {
         setError("Fensterpuffer: {s}", .{@errorName(e)});

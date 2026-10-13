@@ -8,6 +8,7 @@
 //! zur Laufzeit). Das übersetzte PTX liegt auf der Platte im Cache-Ordner.
 
 const std = @import("std");
+const oslib = @import("oslib.zig");
 const diag = @import("diag.zig");
 
 /// ABI-Header für Packs (Gerätecode); gehört dem Kern, nicht dem Pack
@@ -108,7 +109,7 @@ fn writeFile(path: []const u8, data: []const u8) void {
 const NvrtcProgram = ?*opaque {};
 
 const Nvrtc = struct {
-    lib: std.DynLib,
+    lib: oslib.DynLib,
     create: *const fn (*NvrtcProgram, [*:0]const u8, [*:0]const u8, c_int, ?[*]const [*:0]const u8, ?[*]const [*:0]const u8) callconv(.c) c_int,
     compile: *const fn (NvrtcProgram, c_int, ?[*]const [*:0]const u8) callconv(.c) c_int,
     ptx_size: *const fn (NvrtcProgram, *usize) callconv(.c) c_int,
@@ -123,9 +124,11 @@ var nvrtc_cached: ?Nvrtc = null;
 
 fn loadNvrtc() ?*Nvrtc {
     if (nvrtc_cached != null) return &nvrtc_cached.?;
-    const names = [_][]const u8{ "libnvrtc.so", "libnvrtc.so.13", "libnvrtc.so.12", "libnvrtc.so.11.2", "/opt/cuda/lib64/libnvrtc.so" };
+    // Windows: nvrtc64_<major><minor>_0.dll im Treiber/CUDA-Pfad (CUDA_PATH/bin
+    // steht dort üblicherweise im Suchpfad; zusätzlich absolute Pfade).
+    const names = [_][]const u8{ "libnvrtc.so", "libnvrtc.so.13", "libnvrtc.so.12", "libnvrtc.so.11.2", "/opt/cuda/lib64/libnvrtc.so", "nvrtc64_120_0.dll", "nvrtc64_110_0.dll", "nvrtc64_112_0.dll" };
     for (names) |n| {
-        var lib = std.DynLib.open(n) catch continue;
+        var lib = oslib.DynLib.open(n) catch continue;
         var out: Nvrtc = undefined;
         out.lib = lib;
         out.create = lib.lookup(@TypeOf(out.create), "nvrtcCreateProgram") orelse continue;
