@@ -76,15 +76,13 @@ processResources {
 	dependsOn("buildNative", "buildNativeCross")
 	from(nativeOut) {
 		include "**/" + nativeLib
-		eachFile { it.path = nativeLib }
+		eachFile { d -> d.path = nativesDir + "/" + nativeLib }
 		includeEmptyDirs = false
-		into nativesDir
 	}
 	from(crossOut) {
 		include "**/" + crossLib
-		eachFile { it.path = crossLib }
+		eachFile { d -> d.path = "natives/" + crossDir + "/" + crossLib }
 		includeEmptyDirs = false
-		into "natives/" + crossDir
 	}
 }
 tasks.named("runClient") {
