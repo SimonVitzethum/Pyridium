@@ -76,7 +76,10 @@ if [[ "${PYRIDIUM_TEST_SPECTATOR:-0}" == 1 ]]; then
     fi
 fi
 cd -- "$project_dir"
-SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy \
+# Stumm auf drei Ebenen (nur Wegwerf-Test, nie Spiel/Mod): SDL-Dummy,
+# gemutete Test-Optionen (oben) und Null-Backend fuer OpenAL (Minecraft nutzt
+# OpenAL, nicht SDL; unbekannte ALSOFT_DRIVERS werden ignoriert).
+SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy ALSOFT_DRIVERS=null \
 PYRIDIUM_TEST_GPU_DUTY="${PYRIDIUM_TEST_GPU_DUTY:-1}" \
 ./gradlew runClient "${gradle_args[@]}" -PpydRunDir="$test_dir" -PquickWorld=RenderTest -PpydSize=1920x1080 \
     "-PpydJvm=-Dpyridium.headless=true -Dpyridium.noPrefetch=true -Dpyridium.gpuWorldgen=${PYRIDIUM_TEST_GPU_WORLDGEN:-false} -Dpyridium.mode=${PYRIDIUM_TEST_MODE:-rr} -Dpyridium.viewChunks=1024 -Dpyridium.autoQuit=${PYRIDIUM_TEST_SECONDS:-90} -Dpyridium.testTimeout=${PYRIDIUM_TEST_TIMEOUT:-240} -Dpyridium.shotDir=$test_dir/shots -Dpyridium.shotEvery=${PYRIDIUM_TEST_SHOT_EVERY:-15000} -Dpyridium.targetFps=$target_fps -Dpyridium.testEntities=${PYRIDIUM_TEST_ENTITIES:-true} -Dpyridium.testEntityFeatures=${PYRIDIUM_TEST_ENTITIES:-true} -Dpyridium.testMaterials=${PYRIDIUM_TEST_MATERIALS:-true} $extra_jvm" \
