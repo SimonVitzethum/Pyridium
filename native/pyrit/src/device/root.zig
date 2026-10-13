@@ -18,6 +18,7 @@ pub const scene = @import("trace.zig");
 pub const render = @import("render.zig");
 pub const shade = @import("shade.zig");
 pub const post = @import("post.zig");
+pub const cache = @import("cache.zig");
 pub const upscale = @import("upscale.zig");
 pub const anim = @import("anim.zig");
 pub const gbuild = @import("gbuild.zig");

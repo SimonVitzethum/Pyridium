@@ -2111,3 +2111,60 @@ test "Wind: Kette biegt sich weich, Motion Vectors bleiben exakt" {
     try testing.expect(moved > 0 and moved < 1);
     print("  Wind: Spitze {d:.3} bei voller Auslenkung, {d:.4} nach 20 ms\n", .{ @abs(tip_x), moved });
 }
+
+test "GI-Cache: nur jeden N-ten Frame neu (PYRIT_GI_EVERY)" {
+    try testing.expectEqual(@as(u32, 1), pyr.cache.parseGiEvery(null));
+    try testing.expectEqual(@as(u32, 1), pyr.cache.parseGiEvery("1"));
+    try testing.expectEqual(@as(u32, 4), pyr.cache.parseGiEvery("4"));
+    try testing.expectEqual(@as(u32, 1), pyr.cache.parseGiEvery("0"));
+    try testing.expectEqual(@as(u32, 16), pyr.cache.parseGiEvery("99"));
+    try testing.expectEqual(@as(u32, 1), pyr.cache.parseGiEvery("alle"));
+    // Standard: jeder Frame
+    try testing.expect(pyr.cache.giShouldRun(0, 1, true, false));
+    try testing.expect(pyr.cache.giShouldRun(7, 1, true, false));
+    // alle 3: nur bei Vielfachen
+    try testing.expect(pyr.cache.giShouldRun(0, 3, true, false));
+    try testing.expect(!pyr.cache.giShouldRun(1, 3, true, false));
+    try testing.expect(!pyr.cache.giShouldRun(2, 3, true, false));
+    try testing.expect(pyr.cache.giShouldRun(3, 3, true, false));
+    // ohne Verlauf oder bei Geometrieänderung immer
+    try testing.expect(pyr.cache.giShouldRun(1, 3, false, false));
+    try testing.expect(pyr.cache.giShouldRun(1, 3, true, true));
+}
+
+test "statischer Frame-Reuse: nur Jitter wird ignoriert" {
+    var a = types.Camera{
+        .view_to_world = .{ 1, 0, 0, 5, 0, 1, 0, 6, 0, 0, 1, 7 },
+        .projection = types.projection_perspective,
+        .width = 1920,
+        .height = 1080,
+        .scale = .{ 1.2, 0.7 },
+        .shift = .{ 0, 0 },
+        .jitter = .{ 0.25, -0.125 },
+        .near_plane = 0.1,
+        .far_plane = 0,
+    };
+    var b = a;
+    b.jitter = .{ -0.4, 0.3 };
+    try testing.expect(pyr.cache.cameraStaticForReuse(&a, &b));
+    try testing.expect(!pyr.cache.jitterZero(&a));
+    b.jitter = .{ 0, 0 };
+    try testing.expect(pyr.cache.jitterZero(&b));
+    var c = a;
+    c.width = 1280;
+    try testing.expect(!pyr.cache.cameraStaticForReuse(&a, &c));
+    c = a;
+    c.view_to_world[3] += 0.5;
+    try testing.expect(!pyr.cache.cameraStaticForReuse(&a, &c));
+    c = a;
+    c.far_plane = 100;
+    try testing.expect(!pyr.cache.cameraStaticForReuse(&a, &c));
+}
+
+test "Reprojektions-Match teilt die Schwellen mit giTemporal" {
+    try testing.expect(pyr.cache.reprojMatches(.{ 0, 1, 0, 10 }, .{ 0, 1, 0, 10 }));
+    try testing.expect(pyr.cache.reprojMatches(.{ 0, 1, 0, 10 }, .{ 0, 0.95, 0.31, 10.4 }));
+    try testing.expect(!pyr.cache.reprojMatches(.{ 0, 1, 0, 10 }, .{ 1, 0, 0, 10 }));
+    try testing.expect(!pyr.cache.reprojMatches(.{ 0, 1, 0, 10 }, .{ 0, 1, 0, 12 }));
+    try testing.expect(!pyr.cache.reprojMatches(.{ 0, 1, 0, 10 }, .{ 0, 1, 0, types.flt_max }));
+}

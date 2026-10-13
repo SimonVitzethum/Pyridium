@@ -7,6 +7,7 @@
 //! Einträgen des letzten Frames.
 
 const palette_dev = @import("pyrit_device").palette;
+const cache = @import("pyrit_device").cache;
 const std = @import("std");
 const types = @import("pyrit_device").types;
 const api = @import("api.zig");
@@ -151,6 +152,35 @@ const ViewSlot = struct {
     gi_geo: [2]cuda.CUdeviceptr = .{ 0, 0 },
     gi_parity: u1 = 0,
     gi_hist_ok: bool = false,
+    /// Zähler der GI-Frames (für PYRIT_GI_EVERY: GI nur jeden N-ten neu)
+    gi_tick: u64 = 0,
+    /// Statischer Frame-Reuse (PYRIT_STATIC_REUSE=1, opt-in): letzte Endpuffer
+    /// dieser Ansicht. Alle Kopien laufen streamgeordnet (DtoD, kein Warten);
+    /// Gültigkeit über Kamera (ohne Jitter, jitterfrei), Auflösung, Szene
+    /// (scene_seq), Licht-Flags und GI-Modus. Maske: bit i = Puffer i gültig
+    /// (hits, color, normal, albedo, material, depth, motion).
+    stat_ok: bool = false,
+    stat_w: u32 = 0,
+    stat_h: u32 = 0,
+    stat_mask: u32 = 0,
+    stat_seq: u64 = 0,
+    stat_lighting: u32 = 0,
+    stat_half_gi: bool = false,
+    /// Render-Schalter, die das Bild beeinflussen (Masken, Deckung, Skalen)
+    stat_ray_mask: u32 = 0,
+    stat_flags: u32 = 0,
+    stat_transparent: u32 = 0,
+    stat_secondary: u32 = 0,
+    stat_coverage: u32 = 0,
+    stat_detail: f32 = 0,
+    stat_cam: types.CameraData = undefined,
+    stat_hits: cuda.CUdeviceptr = 0,
+    stat_color: cuda.CUdeviceptr = 0,
+    stat_normal: cuda.CUdeviceptr = 0,
+    stat_albedo: cuda.CUdeviceptr = 0,
+    stat_material: cuda.CUdeviceptr = 0,
+    stat_depth: cuda.CUdeviceptr = 0,
+    stat_motion: cuda.CUdeviceptr = 0,
 };
 
 /// Verzögerte Freigabe einer Geometrie. Bis zum nächsten Commit kann die GPU
@@ -347,6 +377,10 @@ pub const Context = struct {
     time_prev: f64 = 0,
     origin: [3]f64 = .{ 0, 0, 0 },
     origin_prev: [3]f64 = .{ 0, 0, 0 },
+    /// Szenenfolge: jede sichtbare Szenenänderung (Instanzen, Skelette, Zeit,
+    /// Ursprung) erhöht ihn im Commit. Der statische Frame-Reuse vergleicht
+    /// ihn statt die Szene zu lesen (CPU liest nie von der GPU zurück).
+    scene_seq: u64 = 0,
 
     const scratch_write_bytes = @sizeOf(types.InstanceWrite);
 
@@ -1896,6 +1930,10 @@ pub const Context = struct {
         std.mem.swap(std.ArrayList(u32), &self.dirty_cur, &self.dirty_prev);
         self.dirty_cur.clearRetainingCapacity();
         try self.uploadScene();
+        // Szenenfolge für den statischen Frame-Reuse: jede sichtbare Änderung
+        // (Instanz-Uploads, Skelette, Zeit/Ursprung, IAS-Umbau) entwertet
+        // zwischengespeicherte Endpuffer. Reine Host-Arbeit, kein GPU-Warten.
+        if (write_count + copy_count > 0 or animated or self.instances_rt_dirty or self.instances_structural or self.time != self.time_prev or !std.mem.eql(f64, &self.origin, &self.origin_prev)) self.scene_seq +%= 1;
         if (self.rt) |r| {
             if (self.instances_rt_dirty or animated) r.markInstancesDirty(self.instances_structural);
             self.instances_structural = false;
@@ -1942,6 +1980,8 @@ pub const Context = struct {
         s.has_last = false;
         s.has_before = false;
         s.gi_hist_ok = false;
+        s.gi_tick = 0;
+        s.stat_ok = false;
         s.post_valid = false;
         s.up_valid = false;
     }
@@ -1964,6 +2004,33 @@ pub const Context = struct {
         v.last = cur;
         const prev_ok = v.has_before and v.before_frame + 1 == self.frame and
             v.before.camera.width == camera.width and v.before.camera.height == camera.height;
+
+        // GI-Modus steht vor den Parametern fest (Ziele sind reine Eingaben).
+        const half_gi = self.lighting.flags & types.lighting_gi_half != 0 and targets.color != 0;
+        const want_static = std.c.getenv("PYRIT_STATIC_REUSE") != null;
+
+        // Statischer Frame-Reuse (opt-in): Kamera ohne Jitter, Auflösung,
+        // Render-Schalter, Szene, Licht und GI-Modus unverändert und kein
+        // Jitter -> alle Ausgaben bitgleich zum Vorframe. Nur streamgeordnete
+        // Gerätekopien, kein Kernel, kein Warten, keine CPU-GPU-Rückfrage:
+        // die CPU hält die GPU nie auf, die GPU läuft nie leer.
+        if (want_static and prev_ok and v.stat_ok and v.stat_w == camera.width and v.stat_h == camera.height and
+            v.stat_seq == self.scene_seq and v.stat_lighting == self.lighting.flags and v.stat_half_gi == half_gi and
+            v.stat_mask == statMask(targets) and v.stat_ray_mask == targets.ray_mask and v.stat_flags == targets.flags and
+            v.stat_transparent == targets.transparent_mask and v.stat_secondary == targets.secondary_mask and
+            v.stat_coverage == targets.coverage and v.stat_detail == targets.detail_scale and
+            cache.jitterZero(camera) and cache.cameraStaticForReuse(camera, &v.stat_cam.camera))
+        {
+            const n = @as(u64, camera.width) * camera.height;
+            if (targets.hits != 0) try self.copyDtoD(targets.hits, v.stat_hits, n * @sizeOf(types.Hit));
+            if (targets.color != 0) try self.copyDtoD(targets.color, v.stat_color, n * 16);
+            if (targets.normal != 0) try self.copyDtoD(targets.normal, v.stat_normal, n * 16);
+            if (targets.albedo != 0) try self.copyDtoD(targets.albedo, v.stat_albedo, n * 16);
+            if (targets.material != 0) try self.copyDtoD(targets.material, v.stat_material, n * 8);
+            if (targets.depth != 0) try self.copyDtoD(targets.depth, v.stat_depth, n * 4);
+            if (targets.motion != 0) try self.copyDtoD(targets.motion, v.stat_motion, n * 8);
+            return;
+        }
 
         var params = types.RenderParams{
             .coverage = @max(targets.coverage, 1),
@@ -2007,15 +2074,20 @@ pub const Context = struct {
             params.trans_hi = hi;
         }
         // Indirekte Beleuchtung in halber Auflösung: eigener Durchgang und
-        // kantenbewusstes Hochskalieren (braucht color, normal, albedo, hits)
+        // kantenbewusstes Hochskalieren (braucht color, normal, albedo, hits).
+        // Caching: PYRIT_GI_EVERY=N rechnet den GI-Durchgang nur jeden N-ten
+        // Frame neu; dazwischen gilt der zeitliche Verlauf weiter. Path Tracing
+        // bleibt vollständig (kein Strahl entfällt, nur Wiederverwendung).
         if (self.lighting.flags & types.lighting_no_ray_effects != 0) params.flags |= types.render_no_ray_effects;
-        const half_gi = self.lighting.flags & types.lighting_gi_half != 0 and params.color != 0;
+        const gi_every = cache.parseGiEvery(if (std.c.getenv("PYRIT_GI_EVERY")) |e| std.mem.span(e) else null);
+        var run_gi = false;
         if (half_gi) {
             if (params.normal == 0 or params.albedo == 0 or params.hits == 0)
                 return fail(error.InvalidArgument, "PYR_LIGHTING_GI_HALF braucht color, normal, albedo und hits", .{});
             const gw = (camera.width + 1) / 2;
             const gh = (camera.height + 1) / 2;
-            if (v.gi_w != gw or v.gi_h != gh) {
+            const gi_geom_changed = v.gi_w != gw or v.gi_h != gh;
+            if (gi_geom_changed) {
                 try self.check(self.drv.cuStreamSynchronize(self.stream), "cuStreamSynchronize");
                 freeGi(&self.drv, v);
                 v.gi_buf = try self.devAlloc(@as(u64, gw) * gh * 8, "indirekte Beleuchtung");
@@ -2027,7 +2099,11 @@ pub const Context = struct {
                 v.gi_h = gh;
                 v.gi_hist_ok = false;
             }
-            params.gi = v.gi_buf;
+            run_gi = cache.giShouldRun(v.gi_tick, gi_every, v.gi_hist_ok, gi_geom_changed);
+            v.gi_tick += 1;
+            // Übersprungener Durchgang: params.gi zeigt auf den letzten
+            // zeitlichen Verlauf; Kombinieren läuft unverändert weiter.
+            params.gi = if (run_gi) v.gi_buf else v.gi_hist[v.gi_parity ^ 1];
             params.gi_width = gw;
             params.gi_height = gh;
         }
@@ -2039,11 +2115,11 @@ pub const Context = struct {
         if (self.timing) |t| if (t.n == 0) self.mark("Beginn");
         if (self.useRt(params.color != 0 or params.normal != 0 or params.albedo != 0)) |r| {
             try r.render(self, &params);
-            if (half_gi) try r.renderGi(self, &params);
+            if (run_gi) try r.renderGi(self, &params);
         } else {
             const grid = [3]u32{ (camera.width + bx - 1) / bx, (camera.height + by - 1) / by, 1 };
             try self.launch(self.fn_render, grid, block, &params_ptr);
-            if (half_gi) {
+            if (run_gi) {
                 const gg = [3]u32{ (params.gi_width + bx - 1) / bx, (params.gi_height + by - 1) / by, 1 };
                 try self.launch(self.fn_gi, gg, block, &params_ptr);
             }
@@ -2053,7 +2129,7 @@ pub const Context = struct {
             // Eigener Verlauf der indirekten Beleuchtung (render.giTemporal);
             // PYRIT_GI_FRAMES=1 schaltet ihn zum Vergleich ab
             const gi_frames: f32 = if (std.c.getenv("PYRIT_GI_FRAMES")) |e| (std.fmt.parseFloat(f32, std.mem.span(e)) catch 32) else 32;
-            if (gi_frames > 1) {
+            if (run_gi and gi_frames > 1) {
                 const gp = v.gi_parity;
                 params.gi_hist_prev = v.gi_hist[gp ^ 1];
                 params.gi_geo_prev = v.gi_geo[gp ^ 1];
@@ -2066,10 +2142,62 @@ pub const Context = struct {
                 params.gi = v.gi_hist[gp];
                 v.gi_parity ^= 1;
                 v.gi_hist_ok = true;
-            } else v.gi_hist_ok = false;
+            } else if (run_gi) v.gi_hist_ok = false;
+            // Bei übersprungenem GI-Durchgang (!run_gi) zeigt params.gi bereits
+            // auf den letzten Verlauf; Verlauf und Kombinieren bleiben gültig.
             const grid = [3]u32{ (camera.width + bx - 1) / bx, (camera.height + by - 1) / by, 1 };
             try self.launch(self.fn_gi_combine, grid, block, &params_ptr);
             self.mark("GI kombinieren");
+        }
+
+        // Statischen Cache füllen (trifft der nächste Frame bei Stillstand):
+        // streamgeordnete Kopien hinter allen Kernels desselben Streams, kein
+        // Warten. Rng-/Jitter-Folgen laufen weiter (kein Einfrieren der
+        // Abtastung im Cache, nur Wiederverwendung ganzer Frames).
+        if (want_static and prev_ok and cache.jitterZero(camera)) {
+            try self.ensureStatic(v, camera.width, camera.height);
+            const n = @as(u64, camera.width) * camera.height;
+            var mask: u32 = 0;
+            if (targets.hits != 0) {
+                try self.copyDtoD(v.stat_hits, targets.hits, n * @sizeOf(types.Hit));
+                mask |= 1;
+            }
+            if (targets.color != 0) {
+                try self.copyDtoD(v.stat_color, targets.color, n * 16);
+                mask |= 2;
+            }
+            if (targets.normal != 0) {
+                try self.copyDtoD(v.stat_normal, targets.normal, n * 16);
+                mask |= 4;
+            }
+            if (targets.albedo != 0) {
+                try self.copyDtoD(v.stat_albedo, targets.albedo, n * 16);
+                mask |= 8;
+            }
+            if (targets.material != 0) {
+                try self.copyDtoD(v.stat_material, targets.material, n * 8);
+                mask |= 16;
+            }
+            if (targets.depth != 0) {
+                try self.copyDtoD(v.stat_depth, targets.depth, n * 4);
+                mask |= 32;
+            }
+            if (targets.motion != 0) {
+                try self.copyDtoD(v.stat_motion, targets.motion, n * 8);
+                mask |= 64;
+            }
+            v.stat_mask = mask;
+            v.stat_cam = cur;
+            v.stat_seq = self.scene_seq;
+            v.stat_lighting = self.lighting.flags;
+            v.stat_half_gi = half_gi;
+            v.stat_ray_mask = targets.ray_mask;
+            v.stat_flags = targets.flags;
+            v.stat_transparent = targets.transparent_mask;
+            v.stat_secondary = targets.secondary_mask;
+            v.stat_coverage = targets.coverage;
+            v.stat_detail = targets.detail_scale;
+            v.stat_ok = true;
         }
     }
 
@@ -2684,6 +2812,62 @@ pub const Context = struct {
         v.gi_w = 0;
         v.gi_h = 0;
         v.gi_hist_ok = false;
+        v.gi_tick = 0;
+        freeStatic(drv, v);
+    }
+
+    /// Statischer Frame-Reuse-Cache (nur Gerätepuffer, Synchronisation beim
+    /// Aufrufer wie bei freeGi). Wird auch bei jeder GI-/Auflösungsänderung
+    /// verworfen, weil er auflösungsabhängig ist.
+    fn freeStatic(drv: anytype, v: *ViewSlot) void {
+        for ([_]*cuda.CUdeviceptr{ &v.stat_hits, &v.stat_color, &v.stat_normal, &v.stat_albedo, &v.stat_material, &v.stat_depth, &v.stat_motion }) |b| {
+            if (b.* != 0) _ = drv.cuMemFree_v2(b.*);
+            b.* = 0;
+        }
+        v.stat_w = 0;
+        v.stat_h = 0;
+        v.stat_mask = 0;
+        v.stat_ok = false;
+    }
+
+    /// Streamgeordnete Gerätekopie (kein Warten, keine CPU-GPU-Rückfrage).
+    fn copyDtoD(self: *Context, dst: cuda.CUdeviceptr, src: cuda.CUdeviceptr, bytes: u64) Error!void {
+        if (bytes == 0 or dst == 0 or src == 0) return;
+        try self.check(self.drv.cuMemcpyDtoDAsync_v2(dst, src, bytes, self.stream), "cuMemcpyDtoDAsync");
+    }
+
+    /// Bitmaske der belegten Render-Ziele (hits, color, normal, albedo,
+    /// material, depth, motion). Der statische Reuse gilt nur bei gleicher
+    /// Belegung wie im gespeicherten Frame.
+    fn statMask(t: *const api.Targets) u32 {
+        var m: u32 = 0;
+        if (t.hits != 0) m |= 1;
+        if (t.color != 0) m |= 2;
+        if (t.normal != 0) m |= 4;
+        if (t.albedo != 0) m |= 8;
+        if (t.material != 0) m |= 16;
+        if (t.depth != 0) m |= 32;
+        if (t.motion != 0) m |= 64;
+        return m;
+    }
+
+    /// Puffer des statischen Frame-Reuse passend zur Auflösung. Nur bei
+    /// Änderung neu (mit Warten wie ensurePost); im Steady State ohne Warten.
+    /// Nur mit PYRIT_STATIC_REUSE belegt (sonst kein Byte).
+    fn ensureStatic(self: *Context, v: *ViewSlot, w: u32, h: u32) Error!void {
+        if (v.stat_w == w and v.stat_h == h and v.stat_color != 0) return;
+        try self.check(self.drv.cuStreamSynchronize(self.stream), "cuStreamSynchronize");
+        freeStatic(&self.drv, v);
+        const n = @as(u64, w) * h;
+        v.stat_hits = try self.devAlloc(n * @sizeOf(types.Hit), "statischer Verlauf");
+        v.stat_color = try self.devAlloc(n * 16, "statischer Verlauf");
+        v.stat_normal = try self.devAlloc(n * 16, "statischer Verlauf");
+        v.stat_albedo = try self.devAlloc(n * 16, "statischer Verlauf");
+        v.stat_material = try self.devAlloc(n * 8, "statischer Verlauf");
+        v.stat_depth = try self.devAlloc(n * 4, "statischer Verlauf");
+        v.stat_motion = try self.devAlloc(n * 8, "statischer Verlauf");
+        v.stat_w = w;
+        v.stat_h = h;
     }
 
     fn freeDlss(self: *Context, v: *ViewSlot) void {
