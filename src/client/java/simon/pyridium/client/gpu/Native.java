@@ -22,11 +22,11 @@ public final class Native {
 	private static final ValueLayout.OfInt I = ValueLayout.JAVA_INT;
 
     private static SymbolLookup lib;
-    private static MethodHandle hModelCreate, hModelDestroy, hModelsFrame, hMaterialFaces, hWorldFeatures;
+    private static MethodHandle hModelCreateVoxels, hModelCreate, hModelDestroy, hModelsFrame, hMaterialFaces, hWorldFeatures;
 	private static final Linker LINKER = Linker.nativeLinker();
 
 	private static MethodHandle hInit, hError, hAlloc, hFree, hUpload, hUpload2d, hDownload2d, hCopy, hCopy2d, hSync, hFill,
-		hComposite, hWorldConfig, hWorldDestroy, hSetLod, hMaterial, hSecStates, hSecPut, hSecRemove, hColSet, hPresentInit, hPresent, hWorldCreate, hWorldFrame, hWorldSetMode, hMemInfo, hDeviceName, hWorldStats, hPlanInfo, hEvRecord, hEvWait, hEvFree;
+		hComposite, hWorldConfig, hWorldDestroy, hSimArea, hSetLod, hMaterial, hSecStates, hSecPut, hSecRemove, hColSet, hPresentInit, hPresent, hWorldCreate, hWorldFrame, hWorldSetMode, hMemInfo, hDeviceName, hWorldStats, hTimingReport, hPackSet, hPackOption, hPackReload, hPackMessage, hPlanInfo, hEvRecord, hEvWait, hEvFree;
 
 	private Native() {
 	}
@@ -38,6 +38,7 @@ public final class Native {
 		Path path = locate();
 		lib = SymbolLookup.libraryLookup(path, Arena.global());
         hInit = fn("pyd_init", FunctionDescriptor.of(I));
+        hModelCreateVoxels = fn("pyd_model_create_voxels", FunctionDescriptor.of(L, L, I, I));
         hModelCreate = fn("pyd_model_create", FunctionDescriptor.of(L, L, I, I, I));
         hModelDestroy = fn("pyd_model_destroy", FunctionDescriptor.of(I, L));
         hModelsFrame = fn("pyd_models_frame", FunctionDescriptor.of(I, L, I));
@@ -54,6 +55,7 @@ public final class Native {
 		hComposite = fn("pyd_composite", FunctionDescriptor.of(I, L, I, I, L, I, L, I, L));
 		hWorldConfig = fn("pyd_world_configure", FunctionDescriptor.of(I, ValueLayout.JAVA_FLOAT, I, ValueLayout.JAVA_FLOAT));
 		hWorldDestroy = fn("pyd_world_destroy", FunctionDescriptor.ofVoid());
+		hSimArea = fn("pyd_set_sim_area", FunctionDescriptor.ofVoid(I, I, I));
 		hSetLod = fn("pyd_set_lod_generator", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS));
 		hMaterial = fn("pyd_material_define", FunctionDescriptor.of(I, I, L, L, I, I, I, ValueLayout.JAVA_FLOAT, ValueLayout.JAVA_FLOAT));
         hMaterialFaces = fn("pyd_material_define_faces", FunctionDescriptor.of(I, I, L, L, L, I, I, ValueLayout.JAVA_FLOAT, ValueLayout.JAVA_FLOAT));
@@ -68,6 +70,11 @@ public final class Native {
 		hWorldFrame = fn("pyd_world_frame", FunctionDescriptor.of(I, L));
 		hWorldSetMode = fn("pyd_world_set_mode", FunctionDescriptor.ofVoid(I));
 		hWorldStats = fn("pyd_world_stats", FunctionDescriptor.ofVoid(L));
+		hTimingReport = fn("pyd_timing_report", FunctionDescriptor.of(I, L, I));
+		hPackSet = fn("pyd_pack_set", FunctionDescriptor.ofVoid(L, L, L));
+		hPackOption = fn("pyd_pack_option", FunctionDescriptor.ofVoid(I, ValueLayout.JAVA_FLOAT));
+		hPackReload = fn("pyd_pack_reload", FunctionDescriptor.of(I, I));
+		hPackMessage = fn("pyd_pack_message", FunctionDescriptor.of(I, L, I));
 		hPlanInfo = fn("pyd_world_plan_info", FunctionDescriptor.of(I, L));
 		hEvRecord = fn("pyd_event_record", FunctionDescriptor.of(L));
 		hEvWait = fn("pyd_event_wait", FunctionDescriptor.of(I, L, I));
@@ -87,6 +94,13 @@ public final class Native {
     public static long modelCreate(long faces, int faceCount, int voxelCount, int log2Size) {
         try {
             return (long)hModelCreate.invokeExact(faces, faceCount, voxelCount, log2Size);
+        } catch (Throwable t) { throw wrap(t); }
+    }
+
+    /** Voxelliste [x, y, z, attribut] (uint4) -> geteilte Geometrie (Strukturvorlagen) */
+    public static long modelCreateVoxels(long voxels, int count, int log2Size) {
+        try {
+            return (long)hModelCreateVoxels.invokeExact(voxels, count, log2Size);
         } catch (Throwable t) { throw wrap(t); }
     }
 
@@ -230,6 +244,15 @@ public final class Native {
 	public static void composite(long target, int tw, int th, long sprites, int count, long texs, int ntex, long region) {
 		try {
 			check((int)hComposite.invokeExact(target, tw, th, sprites, count, texs, ntex, region), "composite");
+		} catch (Throwable t) {
+			throw wrap(t);
+		}
+	}
+
+	/** Simulationsbereich (Chunk-Mitte, Radius): dort rechnet der Fernbereich nie, die echten Chunks kommen vom Server */
+	public static void simArea(int chunkX, int chunkZ, int radius) {
+		try {
+			hSimArea.invokeExact(chunkX, chunkZ, radius);
 		} catch (Throwable t) {
 			throw wrap(t);
 		}
@@ -380,6 +403,54 @@ public final class Native {
 	public static int planInfo(long out) {
 		try {
 			return (int)hPlanInfo.invokeExact(out);
+		} catch (Throwable t) {
+			throw wrap(t);
+		}
+	}
+
+	/** Shaderpack waehlen (vor worldCreate): Pack-Verzeichnis, Ausweichpack, Cache-Ordner. */
+	public static void packSet(String dir, String fallbackDir, String cacheDir) {
+		try (Arena a = Arena.ofConfined()) {
+			hPackSet.invokeExact(a.allocateFrom(dir).address(), a.allocateFrom(fallbackDir).address(), a.allocateFrom(cacheDir).address());
+		} catch (Throwable t) {
+			throw wrap(t);
+		}
+	}
+
+	public static void packOption(int index, float value) {
+		try {
+			hPackOption.invokeExact(index, value);
+		} catch (Throwable t) {
+			throw wrap(t);
+		}
+	}
+
+	/** rebuild: Pack neu bauen (Heissladen); sonst nur Optionswerte. 0 = ok. */
+	public static int packReload(boolean rebuild) {
+		try {
+			return (int)hPackReload.invokeExact(rebuild ? 1 : 0);
+		} catch (Throwable t) {
+			throw wrap(t);
+		}
+	}
+
+	/** Meldung des letzten Pack-Baus (Fehler/Hinweis), leer wenn keine. */
+	public static String packMessage() {
+		try (Arena a = Arena.ofConfined()) {
+			MemorySegment b = a.allocate(4096);
+			int n = (int)hPackMessage.invokeExact(b.address(), 4096);
+			return n > 0 ? new String(b.asSlice(0, n).toArray(ValueLayout.JAVA_BYTE), java.nio.charset.StandardCharsets.UTF_8) : "";
+		} catch (Throwable t) {
+			throw wrap(t);
+		}
+	}
+
+	/** Letzter PYRIT_GPU_TIMING-Bericht oder null. */
+	public static String timingReport() {
+		try (java.lang.foreign.Arena a = java.lang.foreign.Arena.ofConfined()) {
+			java.lang.foreign.MemorySegment b = a.allocate(4096);
+			int n = (int)hTimingReport.invokeExact(b.address(), 4096);
+			return n > 0 ? new String(b.asSlice(0, n).toArray(java.lang.foreign.ValueLayout.JAVA_BYTE), java.nio.charset.StandardCharsets.UTF_8) : null;
 		} catch (Throwable t) {
 			throw wrap(t);
 		}

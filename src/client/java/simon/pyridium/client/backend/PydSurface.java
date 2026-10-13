@@ -122,15 +122,25 @@ public class PydSurface implements GpuSurfaceBackend {
     }
 	private long nextShot = System.currentTimeMillis() + 5000;
 	private int shotIndex;
+	private long lastBurstFrame = -1;
 
 	/** -Dpyridium.shotDir=<dir>: alle 10 s das angezeigte Bild als PNG (Diagnose) */
 	private void maybeShot(PydTexture t, PydTextureView v) {
 		String dir = System.getProperty("pyridium.shotDir");
 		long now = System.currentTimeMillis();
-		if (dir == null || now < this.nextShot) {
+		// -Dpyridium.burstStart=<Weltframe> -Dpyridium.burstCount=<n>: n aufeinanderfolgende Frames (Rauschmessung)
+		long burstStart = Long.getLong("pyridium.burstStart", -1L);
+		if (dir != null && burstStart >= 0) {
+			long wf = simon.pyridium.client.world.PyritWorld.worldFrames();
+			if (wf < burstStart || wf >= burstStart + Long.getLong("pyridium.burstCount", 30L) || wf == this.lastBurstFrame) {
+				return;
+			}
+			this.lastBurstFrame = wf;
+		} else if (dir == null || now < this.nextShot) {
 			return;
+		} else {
+			this.nextShot = now + Long.getLong("pyridium.shotEvery", 10000L);
 		}
-		this.nextShot = now + Long.getLong("pyridium.shotEvery", 10000L);
 		int w = v.getWidth(0), h = v.getHeight(0);
 		long buf = org.lwjgl.system.MemoryUtil.nmemAlloc((long)w * h * 4);
 		try {

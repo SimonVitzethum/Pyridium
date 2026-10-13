@@ -24,6 +24,13 @@ public final class PyritWorld {
 	private static volatile boolean ready;
 	private static long nextLog;
 	private static long camStart;
+	private static long worldFrames;
+
+	/** Diagnose: Weltframes seit Start der festen Testkamera */
+	public static long worldFrames() {
+		return worldFrames;
+	}
+
 
 	public static boolean isReady() {
 		return ready || failed;
@@ -50,7 +57,8 @@ public final class PyritWorld {
 
 	public static int mode() {
 		String m = System.getProperty("pyridium.mode", "rr");
-        if (m.equals("rr") && !RendererSettings.enabled(RendererSettings.Feature.RAY_RECONSTRUCTION)) m = "taau";
+        // Ohne DLSS-RR: nativ mit eigenem Entrauscher und Jitter-TAA (schaerfer und guenstiger als TAAU in 1:1)
+        if (m.equals("rr") && !RendererSettings.enabled(RendererSettings.Feature.RAY_RECONSTRUCTION)) m = "native";
 		return switch (m) {
 			case "native" -> 0;
 			case "dlaa" -> 2;
@@ -60,8 +68,11 @@ public final class PyritWorld {
 		};
 	}
 
+	/** Terrain-Benchmark: der Renderer ruht, die GPU gehoert dem Generator (-Dpyridium.skipWorldRender=true) */
+	private static final boolean SKIP_WORLD = Boolean.getBoolean("pyridium.skipWorldRender");
+
 	public static void render(CameraRenderState camera) {
-		if (failed || !camera.initialized) {
+		if (failed || !camera.initialized || SKIP_WORLD) {
 			return;
 		}
 		Minecraft mc = Minecraft.getInstance();
@@ -82,7 +93,12 @@ public final class PyritWorld {
 				}
 				// Paletten/Materialien vor dem Generator, der sie benutzt
                 requestedMode = mode();
+                ShaderPacks.init();
                 Native.worldCreate(seed, requestedMode, features);
+                String packMessage = Native.packMessage();
+                if (!packMessage.isEmpty()) {
+                    LOGGER.warn("Pyridium: Shaderpack: {}", packMessage);
+                }
                 createdFeatures = features;
                 float targetFps = Float.parseFloat(System.getProperty("pyridium.targetFps", "165"));
 				// LOD unsichtbar: ein Voxel jeder Stufe hoechstens ~1 Pixel gross
@@ -108,6 +124,7 @@ public final class PyritWorld {
                 Native.worldSetMode(desiredMode);
                 requestedMode = desiredMode; // Do not overwrite a native fallback every frame.
             }
+			ShaderPacks.poll();
 			SectionSync.tick(Integer.getInteger("pyridium.sectionsPerFrame", 2048));
 			PydTexture target = (PydTexture)mc.gameRenderer.mainRenderTarget().getColorTexture();
 			long a = MemoryUtil.memAddress(CAM);
@@ -127,8 +144,18 @@ public final class PyritWorld {
 				pi = (int)(((System.currentTimeMillis() - camStart) / Math.max(every, 1L)) % poses.length);
 				String[] v = poses[pi].split(",");
 				p = new Vec3(Double.parseDouble(v[0]), Double.parseDouble(v[1]), Double.parseDouble(v[2]));
-				float yaw = (float)Math.toRadians(Float.parseFloat(v[3])), pitch = (float)Math.toRadians(Float.parseFloat(v[4]));
+				// Diagnose: -Dpyridium.camYawRate=Grad/s und -Dpyridium.camSpeed=Bloecke/s lassen die feste Pose wandern
+				// -Dpyridium.camFrameDt=<s>: Pose haengt vom Frameindex ab (reproduzierbar, fuer Rauschvergleiche)
+				double frameDt = Double.parseDouble(System.getProperty("pyridium.camFrameDt", "0"));
+				double secs = frameDt > 0 ? worldFrames * frameDt : (System.currentTimeMillis() - camStart) * 1e-3;
+				worldFrames++;
+				float yawRate = Float.parseFloat(System.getProperty("pyridium.camYawRate", "0"));
+				double speed = Double.parseDouble(System.getProperty("pyridium.camSpeed", "0"));
+				float yaw = (float)Math.toRadians(Float.parseFloat(v[3]) + yawRate * secs), pitch = (float)Math.toRadians(Float.parseFloat(v[4]));
 				f = new Vector3f((float)(-Math.sin(yaw) * Math.cos(pitch)), (float)-Math.sin(pitch), (float)(Math.cos(yaw) * Math.cos(pitch)));
+				if (speed != 0) {
+					p = p.add(f.x * speed * secs, 0, f.z * speed * secs);
+				}
 				u = new Vector3f(0, 1, 0);
 			}
             EntityScene.render(camera, p);
@@ -144,6 +171,10 @@ public final class PyritWorld {
 				fovY = 1.2f;
 			}
 			MemoryUtil.memPutFloat(a + 36, fovY);
+			// Simulationsbereich: dort kommen die echten Chunks vom Server, der Fernbereich rechnet sie nie
+			Native.simArea((int)Math.floor(p.x) >> 4, (int)Math.floor(p.z) >> 4, mc.options.simulationDistance().get());
+			// Pixel je Block in Entfernung 1: bestimmt, ab welcher Stufe Hoehlen nicht mehr sichtbar sind (LodGenerator)
+			LodGenerator.pixelsPerBlock = 0.5 * target.getHeight(0) / Math.tan(fovY * 0.5);
 			MemoryUtil.memPutFloat(a + 40, u.x);
 			MemoryUtil.memPutFloat(a + 44, u.y);
 			MemoryUtil.memPutFloat(a + 48, u.z);
@@ -162,6 +193,10 @@ public final class PyritWorld {
 				Native.worldStats(MemoryUtil.memAddress(STATS));
 				LOGGER.info("Pyridium: {} Chunks sichtbar, {} resident, {} offen; LOD {} px/Voxel, {} MiB, {} Ueberlaeufe",
 					STATS.getInt(0), STATS.getInt(4), STATS.getInt(8), STATS.getFloat(24), STATS.getLong(40) >> 20, STATS.getInt(20));
+			}
+			String timing = Native.timingReport();
+			if (timing != null) {
+				LOGGER.info("Pyridium: {}", timing);
 			}
 			if (Native.worldFrame(a) != 0) {
 				LOGGER.error("Pyridium: Weltframe fehlgeschlagen: {}", Native.error());

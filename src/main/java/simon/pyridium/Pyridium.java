@@ -13,6 +13,8 @@ public class Pyridium implements ModInitializer {
 		// Server-Seite (dediziert und integriert): exakte Terrain-Generierung auf der GPU (CUDA)
 		ServerLifecycleEvents.SERVER_STARTING.register(GpuTerrain::serverStarting);
 		ServerLifecycleEvents.SERVER_STOPPED.register(GpuTerrain::serverStopped);
+		ServerLifecycleEvents.SERVER_STARTING.register(simon.pyridium.worldgen.full.FullChunkService::serverStarting);
+		ServerLifecycleEvents.SERVER_STOPPED.register(simon.pyridium.worldgen.full.FullChunkService::serverStopped);
 		ServerLifecycleEvents.SERVER_STARTED.register(WorldgenBench::serverStarted);
 	}
 }

@@ -26,8 +26,11 @@ import simon.pyridium.client.gpu.Native;
 import simon.pyridium.worldgen.exact.CudaCompute;
 import simon.pyridium.worldgen.exact.ExactBiomes;
 import simon.pyridium.worldgen.exact.ExactLodPipeline;
+import simon.pyridium.worldgen.exact.ExactLodSurface;
+import simon.pyridium.worldgen.exact.ExactOres;
 import simon.pyridium.worldgen.exact.ExactPlan;
 import simon.pyridium.worldgen.exact.ExactTerrainPipeline;
+import simon.pyridium.worldgen.exact.ExactVegetation;
 
 /**
  * Fernbereich wie Distant Horizons, aber vollstaendig auf der GPU: Pyrits Generator-Thread ruft
@@ -52,13 +55,22 @@ public final class LodGenerator {
 	private ExactLodPipeline.Shared shared;
 	private final Map<Integer, String> failed = new HashMap<>();
 	private long generated, calls;
-	private final long[] levelCols = new long[16], levelJobs = new long[16];
-	private final double[] levelMs = new double[16];
+	private final long[] levelCols = new long[MAX_LOD + 1], levelJobs = new long[MAX_LOD + 1];
+	private final double[] levelMs = new double[MAX_LOD + 1];
 	private double ms2d, msBand, ms3d, msTotal;
-	private final long[] skipped = new long[16];
+	private final long[] skipped = new long[MAX_LOD + 1];
 	private final int sea;
 	private int debugBand = 12;
 	private double ms;
+
+	private ExactLodSurface surface;
+	private int[] surfaceTable;
+	private int[] oreTable;
+	private net.minecraft.world.level.levelgen.WorldGenerationContext genCtx;
+	private boolean surfaceTried;
+	private net.minecraft.server.MinecraftServer server;
+	private LodStructures structures;
+	private boolean structuresTried;
 
 	private LodGenerator(CudaCompute gpu, RandomState rs, NoiseGeneratorSettings settings, ExactBiomes biomes, int minY, int height, int sea, long seed) {
 		this.gpu = gpu;
@@ -71,7 +83,7 @@ public final class LodGenerator {
 		this.biomeTable = biomeTable(biomes);
 		this.sea = sea;
 		this.lpBase = new int[]{sea, 0, 0, 0, BlockPalette.attrOf(Blocks.WATER.defaultBlockState()), BlockPalette.attrOf(Blocks.STONE.defaultBlockState()),
-			BlockPalette.attrOf(Blocks.DEEPSLATE.defaultBlockState()), BlockPalette.attrOf(Blocks.BEDROCK.defaultBlockState()), (int)seed};
+			BlockPalette.attrOf(Blocks.DEEPSLATE.defaultBlockState()), BlockPalette.attrOf(Blocks.BEDROCK.defaultBlockState()), (int)seed, (int)(seed >>> 32)};
 	}
 
 	/** Upcall-Stub fuer libpyridium (einmalig) */
@@ -136,11 +148,20 @@ public final class LodGenerator {
 				return;
 			}
 			LodGenerator g = new LodGenerator(gpu, cc.randomState(), settings, eb, level.getMinY(), level.getHeight(), settings.seaLevel(), level.getSeed());
+			g.genCtx = new net.minecraft.world.level.levelgen.WorldGenerationContext(gen, level);
+			g.server = server;
 			active = g;
 			// Plaene und Kerne aller Stufen im Hintergrund vorbereiten (grob zuerst: die sieht man
 			// beim Beitritt als Erstes); Generator-Auftraege warten nur auf ihre eigene Stufe
 			Thread warm = new Thread(() -> {
-				for (int lod = 12; lod >= 0; lod--) {
+				// gebraucht werden die Stufen bis zum Ring um die Kamera, der die Sichtweite deckt (2 Chunks breit);
+				// mit einer Stufe Reserve. Weitere entstehen bei Bedarf.
+				long viewBlocks = Integer.getInteger("pyridium.viewChunks", 1024) * 16L;
+				int top = 1;
+				while (top < MAX_LOD && (64L << top) < viewBlocks) {
+					top++;
+				}
+				for (int lod = Math.min(top + 1, MAX_LOD); lod >= 0; lod--) {
 					synchronized (g) {
 						if (active != g) {
 							return;
@@ -151,7 +172,14 @@ public final class LodGenerator {
 			}, "Pyridium LOD-Vorbereitung");
 			warm.setDaemon(true);
 			warm.start();
-			if (!Boolean.getBoolean("pyridium.noPrefetch")) {
+			long benchSeconds = Long.getLong("pyridium.lodBench", 0L);
+			if (benchSeconds > 0) {
+				// Terrain-Benchmark: nur der Generator, mit GPU-Anteil (duty), siehe tools/bench_terrain.sh
+				double duty = Math.clamp(Double.parseDouble(System.getProperty("pyridium.lodBenchDuty", "1")), 0.05, 1.0);
+				Thread bt = new Thread(() -> g.benchLoop(benchSeconds, duty), "Pyridium LOD-Bench");
+				bt.setDaemon(true);
+				bt.start();
+			} else if (Boolean.getBoolean("pyridium.prefetch")) {
 				Thread pf = new Thread(g::prefetchLoop, "Pyridium Vorausgenerator");
 				pf.setDaemon(true);
 				pf.setPriority(Thread.NORM_PRIORITY - 1);
@@ -171,6 +199,10 @@ public final class LodGenerator {
 			synchronized (g) {
 				// CudaCompute entlaedt alle Module selbst (die Pipelines nicht zusaetzlich schliessen)
 				g.pipes.clear();
+				if (g.structures != null) {
+					g.structures.close();
+				}
+				g.structures = null;
 				g.gpu.close();
 			}
 		}
@@ -219,7 +251,27 @@ public final class LodGenerator {
 	}
 
 	private static final int STAGE_N = Integer.getInteger("pyridium.prefetchBatch", 384);
+	/** Obergrenze der Stufen (Pyrit: max_lod 20); die tatsaechlich noetigen folgen der Sichtweite */
+	private static final int MAX_LOD = 24;
 	private static final int STAGE_CAP = 16384;
+	/**
+	 * Hoehlen werden nur bis zu diesem Abstand erzeugt (Bloecke, Richtwert 64 Chunks); weiter weg genuegt das
+	 * Hoehenfeld. Keine feste Stufe: ein Voxel der Stufe l liegt bei 1 Pixel Zielgroesse etwa in
+	 * pixelsPerBlock * 2^l Bloecken Entfernung; die Entscheidung folgt Aufloesung und FOV zur Laufzeit.
+	 */
+	private static final double CAVE_BLOCKS = Double.parseDouble(System.getProperty("pyridium.caveBlocks", "1024"));
+	/** vom Renderer je Frame gesetzt (Hoehe / (2 tan(fov/2))) */
+	public static volatile double pixelsPerBlock = 700;
+
+	/** Stufen, die je nach Kamera noch Hoehlen brauchen koennten (grobe Untergrenze 128 px/Block) */
+	private static boolean mayNeedCaves(int lod) {
+		return (1L << lod) * 128.0 <= CAVE_BLOCKS;
+	}
+
+	/** Hoehenfeld statt 3D-Dichte fuer diese Stufe, gemessen an der aktuellen Kamera */
+	private static boolean heightfield(int lod) {
+		return (1L << lod) * pixelsPerBlock > CAVE_BLOCKS;
+	}
 	private final it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap<Entry> cache = new it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap<>();
 	private final java.util.TreeMap<Long, Long> ringLive = new java.util.TreeMap<>(); // off -> Schluessel
 	private long[] stageVox, stageCounts, stageCountsHost, ring, hostCounts, hostOne;
@@ -233,19 +285,33 @@ public final class LodGenerator {
 		return (long)lod << 58 | ((long)(y & 0xfff)) << 46 | ((long)(x & 0x7fffff)) << 23 | (z & 0x7fffff);
 	}
 
+	/**
+	 * Der Generator ist statisch: Pyrits Auftraege werden direkt gerechnet, ohne Vorrat und Vorausplanung (bei >= 20k Chunks/s
+	 * ist Bewegung kein Problem mehr). Nur kleine Zaehler-Puffer; Ring und Zwischenpuffer gibt es nur fuer -Dpyridium.prefetch=true
+	 * und den Benchmark.
+	 */
+	private void allocBasic() {
+		if (this.hostCounts != null) {
+			return;
+		}
+		this.hostCounts = this.gpu.readbackBuffer(4096 * 4L);
+		this.hostOne = this.gpu.readbackBuffer(4096 * 4L);
+	}
+
 	private void allocPrefetch() {
+		this.allocBasic();
 		if (this.stageVox != null) {
 			return;
 		}
 		long[] mem = new long[2];
-		long free = Long.getLong("pyridium.prefetchMiB", 384L) << 20;
+		// Vorrat nach freiem VRAM (andere Prozesse, z. B. ein Training, teilen sich die GPU): 6 %, 64..384 MiB
+		long avail = this.gpu.freeMemory();
+		long free = Long.getLong("pyridium.prefetchMiB", Math.clamp(avail / 16 >> 20, 64L, 384L)) << 20;
 		this.ringSize = free;
 		this.ring = this.gpu.deviceBuffer(this.ringSize);
 		this.stageVox = this.gpu.deviceBuffer((long)STAGE_N * STAGE_CAP * 16L);
 		this.stageCounts = this.gpu.deviceBuffer(STAGE_N * 4L);
 		this.stageCountsHost = this.gpu.readbackBuffer(STAGE_N * 4L);
-		this.hostCounts = this.gpu.readbackBuffer(4096 * 4L);
-		this.hostOne = this.gpu.readbackBuffer(4096 * 4L);
 		LOGGER.info("Pyridium: Vorausgenerator mit {} MiB Vorrat", this.ringSize >> 20);
 	}
 
@@ -290,6 +356,84 @@ public final class LodGenerator {
 	}
 
 	/** Vorausgenerator-Thread */
+	/**
+	 * Terrain-Benchmark (-Dpyridium.lodBench=Sekunden, -Dpyridium.lodBenchDuty=GPU-Anteil 0..1): erzeugt den LOD-Baum um eine
+	 * synthetische Kamera wie der Vorausgenerator, ohne Renderer. Ist die Sicht voll, wandert die Kamera weiter (Dauerlast wie im
+	 * Flug). Der GPU-Anteil wird durch Pausen nach jedem Stapel erreicht (Pause = Stapelzeit * (1/duty - 1)). Ausgabe: Chunks/s.
+	 */
+	private void benchLoop(long seconds, double duty) {
+		try {
+			long viewBlocks = Integer.getInteger("pyridium.viewChunks", 1024) * 16L;
+			int top = 1;
+			while (top < MAX_LOD && (64L << top) < viewBlocks) {
+				top++;
+			}
+			// warten, bis die Stufen vorbereitet sind (Vorwaermthread)
+			long wait0 = System.nanoTime();
+			while (!this.stop && active == this) {
+				boolean ready = true;
+				synchronized (this) {
+					for (int l = 0; l <= Math.min(top + 1, MAX_LOD); l++) {
+						if (this.pipes.get(l) == null && !this.failed.containsKey(l)) {
+							ready = false;
+						}
+					}
+				}
+				if (ready || System.nanoTime() - wait0 > 180_000_000_000L) {
+					break;
+				}
+				Thread.sleep(200);
+			}
+			double refineK = pixelsPerBlock / Math.max(0.1, Double.parseDouble(System.getProperty("pyridium.voxelPx", "1.0")));
+			double camX = 0, camZ = 0;
+			long t0 = System.nanoTime(), lastLog = t0, deadline = t0 + seconds * 1_000_000_000L;
+			long chunks0 = this.prefetched, lastChunks = chunks0, batches = 0, fills = 0;
+			double busyMs = 0;
+			LOGGER.info("Pyridium: LOD-Bench Start: {} s, GPU-Anteil {}, Sicht {} Bloecke, refine_k {}, oben L{}", seconds, duty, viewBlocks,
+				String.format("%.0f", refineK), top);
+			while (!this.stop && active == this && System.nanoTime() < deadline) {
+				double[] c = {5, 0, 2, viewBlocks, refineK, this.minY, this.minY + this.height, top, camX, 120, camZ};
+				java.util.List<int[]> todo;
+				synchronized (this) {
+					todo = this.plan(c);
+				}
+				if (todo.isEmpty()) {
+					fills++;
+					camX += viewBlocks / 2.0;
+					camZ += viewBlocks / 3.0;
+					continue;
+				}
+				long b0 = System.nanoTime();
+				synchronized (this) {
+					this.prefetchBatch(todo);
+				}
+				long b1 = System.nanoTime();
+				busyMs += (b1 - b0) / 1e6;
+				batches++;
+				if (duty < 0.999) {
+					Thread.sleep((long)((b1 - b0) / 1e6 * (1.0 / duty - 1.0)));
+				}
+				long now = System.nanoTime();
+				if (now - lastLog > 5_000_000_000L) {
+					LOGGER.info("Pyridium: LOD-Bench {} s: {} Chunks, {} Chunks/s (letzte 5 s {} Chunks/s), {} Stapel, Sicht {}x voll",
+						(now - t0) / 1_000_000_000L, this.prefetched - chunks0,
+						String.format("%.0f", (this.prefetched - chunks0) / ((now - t0) / 1e9)),
+						String.format("%.0f", (this.prefetched - lastChunks) / ((now - lastLog) / 1e9)), batches, fills);
+					lastLog = now;
+					lastChunks = this.prefetched;
+				}
+			}
+			double secs = (System.nanoTime() - t0) / 1e9;
+			long total = this.prefetched - chunks0;
+			LOGGER.info("Pyridium: LOD-Bench ERGEBNIS: {} Chunks in {} s = {} Chunks/s; Generator beschaeftigt {}% der Zeit (Stapel {}), GPU-Anteil {}",
+				total, String.format("%.1f", secs), String.format("%.0f", total / secs), String.format("%.1f", 100.0 * busyMs / (secs * 1000.0)), batches, duty);
+		} catch (InterruptedException e) {
+			// beendet
+		} catch (Throwable t) {
+			LOGGER.error("Pyridium: LOD-Bench", t);
+		}
+	}
+
 	private void prefetchLoop() {
 		MemorySegment info = Arena.global().allocate(11 * 8L, 8);
 		long lastLog = 0;
@@ -416,7 +560,23 @@ public final class LodGenerator {
 			}
 			reqs.add(new int[]{t[0], t[1], t[2], t[3], reqs.size()});
 		}
+		LodStructures st = LodStructures.KERNEL_MODE ? this.structures() : null;
+		if (st != null && !reqs.isEmpty()) {
+			// Vorrat nur mit fertigen Strukturen fuellen (der Vorrat wird nicht neu gerechnet); der Rest folgt, sobald die Regionen da sind
+			boolean[] ready = st.ensure(reqs);
+			java.util.List<int[]> keep = new java.util.ArrayList<>(reqs.size());
+			for (int i = 0; i < reqs.size(); i++) {
+				if (ready[i]) {
+					int[] r = reqs.get(i);
+					keep.add(new int[]{r[0], r[1], r[2], r[3], keep.size()});
+				}
+			}
+			reqs = keep;
+		}
 		if (reqs.isEmpty()) {
+			if (st != null) {
+				this.wait(10);   // auf Strukturregionen warten, ohne die Sperre zu halten
+			}
 			return;
 		}
 		this.gpu.zeroAsync(this.stageCounts[0], reqs.size() * 4L);
@@ -456,11 +616,14 @@ public final class LodGenerator {
 
 	/** Pyrits Auftrag: aus dem Vorrat kopieren, Fehlendes sofort rechnen */
 	private boolean run(long keys, int count, long voxels, long counts, int capacity, long known) throws Exception {
+		if (this.calls < 3) {
+			LOGGER.info("Pyridium: LOD-Auftrag {} mit {} Chunks", this.calls, count);
+		}
 		MemorySegment k = MemorySegment.ofAddress(keys).reinterpret(count * 16L);
 		MemorySegment kn = MemorySegment.ofAddress(known).reinterpret(count * 4L);
 		java.util.List<int[]> miss = new java.util.ArrayList<>();
 		java.util.List<int[]> all = new java.util.ArrayList<>();
-		this.allocPrefetch();
+		this.allocBasic();
 		long hostOne = this.hostOne[1];
 		int nHit = 0;
 		for (int i = 0; i < count; i++) {
@@ -469,7 +632,7 @@ public final class LodGenerator {
 			}
 			int x = k.get(ValueLayout.JAVA_INT, i * 16L), y = k.get(ValueLayout.JAVA_INT, i * 16L + 4), z = k.get(ValueLayout.JAVA_INT, i * 16L + 8);
 			int lod = k.get(ValueLayout.JAVA_INT, i * 16L + 12);
-			if (lod > 14) {
+			if (lod > MAX_LOD) {
 				return false;
 			}
 			int[] r = {lod, x, y, z, i};
@@ -493,7 +656,7 @@ public final class LodGenerator {
 			miss.add(r);
 			if (this.missLog < 30 && this.prefetched > 0) {
 				this.missLog++;
-				Entry pe = lod < 14 ? this.cache.get(key(lod + 1, x >> 1, y >> 1, z >> 1)) : null;
+				Entry pe = lod < MAX_LOD ? this.cache.get(key(lod + 1, x >> 1, y >> 1, z >> 1)) : null;
 				LOGGER.info("Pyridium: Fehlend L{} {} {} {}: eigener Zustand {}, Eltern {}", lod, x, y, z, e == null ? "-" : e.state,
 					pe == null ? "-" : pe.state);
 			}
@@ -502,6 +665,10 @@ public final class LodGenerator {
 			if (this.pipeline(r[0]) == null) {
 				return false;
 			}
+		}
+		LodStructures stc = LodStructures.KERNEL_MODE ? this.structures() : null;
+		if (stc != null && !miss.isEmpty()) {
+			stc.await(miss, 300);   // hoechstens kurz warten; fehlt eine Region danach, entsteht der Chunk ohne sie
 		}
 		long t0 = System.nanoTime();
 		this.genKeys(miss, voxels, counts, capacity);
@@ -519,7 +686,7 @@ public final class LodGenerator {
 		}
 		this.calls++;
 		this.ms += (System.nanoTime() - t0) / 1e6;
-		if (this.calls % 50 == 0) {
+		if (this.calls % 50 == 0 || this.calls <= 3) {
 			this.logStats();
 		}
 		return true;
@@ -527,10 +694,13 @@ public final class LodGenerator {
 
 	private void logStats() {
 		StringBuilder sb = new StringBuilder();
-		for (int l = 0; l < 15; l++) {
+		for (int l = 0; l <= MAX_LOD; l++) {
 			if (this.levelCols[l] > 0) {
 				sb.append(String.format(" L%d: %d Sp/%d Ch (%d leer)", l, this.levelCols[l], this.levelJobs[l], this.skipped[l]));
 			}
+		}
+		if (this.structures != null) {
+			LOGGER.info("Pyridium: LOD-Strukturen gesamt: {} ms, {} Regionen, {} Starts, {} Teile", (int)this.structures.msTotal, this.structures.regionsGenerated, this.structures.startsLast, this.structures.piecesLast);
 		}
 		LOGGER.info("Pyridium: LOD-Generator {} Auftraege, Vorrat {} Treffer/{} fehlend, {} voraus; {} Spalten (2D {} ms, Band {} ms, 3D {} ms, im Auftrag {} ms, Aufruf gesamt {} ms);{}",
 			this.calls, this.hits, this.misses, this.prefetched, this.generated, String.format("%.0f", this.ms2d), String.format("%.0f", this.msBand),
@@ -542,6 +712,9 @@ public final class LodGenerator {
 		if (reqs.isEmpty()) {
 			return;
 		}
+		// Strukturen der beruehrten Regionen bereitstellen (GPU, siehe LodStructures)
+		LodStructures st = this.structures();
+
 		// nach Stufe und Spalte gruppieren
 		Map<Integer, Map<Long, Integer>> cols = new HashMap<>();
 		Map<Integer, java.util.List<int[]>> jobs = new HashMap<>();
@@ -585,7 +758,7 @@ public final class LodGenerator {
 		for (Batch bt : fast) {
 			bt.p.columnsAsync(bt.n, bt.xz);
 		}
-		this.gpu.sync();
+		// kein Warten zwischen 2D und 3D: das Band liegt auf der GPU, alles laeuft im selben Stream
 		long q1 = System.nanoTime();
 		this.ms2d += (q1 - q0) / 1e6;
 		for (Batch bt : fast) {
@@ -612,40 +785,19 @@ public final class LodGenerator {
 		}
 	}
 
-	/** Band je Spalte (nach columns) und die Chunks darin; async: letzter Lauf ohne Warten */
+	/** Chunks der Spalten [c0, c0+n) als Kandidaten; das Band waehlt die GPU (wg_lod_select), async: letzter Lauf ohne Warten */
 	private void chunksOf(int lod, ExactLodPipeline p, int c0, int n, int[] xz, java.util.List<int[]> all, long voxels, long counts, int capacity,
 		boolean async) {
-		int s = 1 << lod;
-		long b0 = System.nanoTime();
-		int[][] band = new int[n][];
-		for (int c = 0; c < n; c++) {
-			int[] r = p.surfaceRange(c);
-			if (this.debugBand-- > 0) {
-				LOGGER.info("Pyridium: Band L{} Spalte {},{}: Oberflaeche {}..{}", lod, xz[c * 2], xz[c * 2 + 1], r[0], r[1]);
-			}
-			int lo = r[0] - ExactLodPipeline.BAND_BELOW, hi = r[1] + ExactLodPipeline.BAND_ABOVE;
-			if (r[0] < this.sea) {
-				hi = Math.max(hi, this.sea + 1); // Wasseroberflaeche
-			}
-			band[c] = new int[]{lo, hi};
-		}
-		// nur Chunks im Band: exakte Dichte in ihrem eigenen y-Bereich
 		java.util.List<int[]> sel = new java.util.ArrayList<>();
 		for (int[] j : all) {
-			if (j[0] < c0 || j[0] >= c0 + n) {
-				continue;
-			}
-			int cy0 = j[1] * 32 * s, cy1 = cy0 + 32 * s;
-			int[] b = band[j[0] - c0];
-			if (cy1 > b[0] && cy0 < b[1]) {
+			if (j[0] >= c0 && j[0] < c0 + n) {
 				sel.add(j);
-			} else {
-				this.skipped[lod]++;
 			}
 		}
-		this.msBand += (System.nanoTime() - b0) / 1e6;
-		for (int j0 = 0; j0 < sel.size(); j0 += p.chunkCapacity) {
-			int nj = Math.min(p.chunkCapacity, sel.size() - j0);
+		boolean hf = heightfield(lod);
+		int cap = p.capacityFor(hf);
+		for (int j0 = 0; j0 < sel.size(); j0 += cap) {
+			int nj = Math.min(cap, sel.size() - j0);
 			int[] jd = new int[nj * 4];
 			for (int q = 0; q < nj; q++) {
 				int[] j = sel.get(j0 + q);
@@ -655,9 +807,9 @@ public final class LodGenerator {
 			}
 			// Host-Puffer der Stufe werden je Lauf neu beschrieben: nur der letzte darf offen bleiben
 			if (async && j0 + nj >= sel.size()) {
-				p.chunksAsync(xz, nj, jd, voxels, counts, capacity);
+				p.chunksAsync(nj, jd, voxels, counts, capacity, hf);
 			} else {
-				p.chunks(xz, nj, jd, voxels, counts, capacity);
+				p.chunks(nj, jd, voxels, counts, capacity, hf);
 			}
 			this.levelJobs[lod] += nj;
 		}
@@ -665,33 +817,105 @@ public final class LodGenerator {
 
 	private ExactLodPipeline pipeline(int lod) {
 		ExactLodPipeline p = this.pipes.get(lod);
-		if (p != null || this.failed.containsKey(lod)) {
+		if (p != null || this.failed.containsKey(lod) || System.nanoTime() < this.oomCooldown) {
 			return p;
 		}
 		try {
 			long t0 = System.nanoTime();
 			ExactPlan plan2 = ExactLodPipeline.plan2d(this.rs, this.settings, lod);
-			ExactPlan plan3 = ExactLodPipeline.plan3d(this.rs, this.settings, lod);
-			if (!plan2.unsupported.isEmpty() || !plan3.unsupported.isEmpty()) {
-				throw new IllegalStateException("nicht unterstuetzt: " + plan2.unsupported + plan3.unsupported);
+			// ferne Stufen: Hoehenfeld ohne 3D-Dichte (Hoehlen sind nur in der Naehe sichtbar)
+			ExactPlan plan3 = !mayNeedCaves(lod) ? null : ExactLodPipeline.plan3d(this.rs, this.settings, lod);
+			if (!plan2.unsupported.isEmpty() || (plan3 != null && !plan3.unsupported.isEmpty())) {
+				throw new IllegalStateException("nicht unterstuetzt: " + plan2.unsupported + (plan3 == null ? "" : plan3.unsupported));
 			}
 			if (this.shared == null) {
 				// gemeinsame Arbeitspuffer aller Stufen
 				// Arbeitsspeicher nach freiem VRAM: mehr Chunks je Lauf = bessere Auslastung
-				this.shared = new ExactLodPipeline.Shared(this.gpu, Long.getLong("pyridium.lodScratchMiB", 768L) << 20, 48L << 20, 512);
+				this.shared = new ExactLodPipeline.Shared(this.gpu, Long.getLong("pyridium.lodScratchMiB", Math.clamp(this.gpu.freeMemory() / 8 >> 20, 32L, 768L)) << 20, 48L << 20, 512);
 			}
 			boolean codegen = !Boolean.getBoolean("pyridium.lodInterpreter");
+			this.ensureSurface();
+			LodStructures st = this.structures();
 			p = new ExactLodPipeline(this.gpu, plan2, plan3, this.biomes, this.biomeTable, lod, this.minY, this.height, this.shared, this.lpBase,
-				ExactTerrainPipeline.JAR, codegen);
+				ExactTerrainPipeline.JAR, codegen, this.surface, this.surfaceTable, this.oreTable, !Boolean.getBoolean("pyridium.lodNoCarve"),
+					st == null || !LodStructures.KERNEL_MODE ? null : st.view(), st == null ? 0 : st.maxStep);
 			this.pipes.put(lod, p);
-			LOGGER.info("Pyridium: LOD-Stufe {} (Schritt {}): 2D {} Aufgaben, 3D {} Aufgaben/{} floats, {} Spalten, {} Chunks je Lauf, {} ms", lod,
-				1 << lod, plan2.tasks.size(), plan3.tasks.size(), plan3.scratchFloats, p.colCapacity, p.chunkCapacity,
+			LOGGER.info("Pyridium: LOD-Stufe {} (Schritt {}{}): 2D {} Aufgaben, 3D {} Aufgaben/{} floats, {} Spalten, {} Chunks je Lauf, {} ms", lod,
+				1 << lod, plan3 == null ? ", Hoehenfeld" : "", plan2.tasks.size(), plan3 == null ? 0 : plan3.tasks.size(), plan3 == null ? 0 : plan3.scratchFloats,
+				p.colCapacity, p.chunkCapacity,
 				(System.nanoTime() - t0) / 1000000);
 			return p;
 		} catch (Exception e) {
+			if (String.valueOf(e).contains("OUT_OF_MEMORY")) {
+				// Grafikspeicher ist knapp (Renderer, Server-Generator, andere Programme): spaeter erneut versuchen
+				// statt die Stufe dauerhaft zu verlieren; kleinere Arbeitspuffer fuer den Neuversuch
+				LOGGER.warn("Pyridium: LOD-Stufe {}: kein Grafikspeicher, neuer Versuch spaeter ({})", lod, e.getMessage());
+				this.shared = null;
+				this.oomCooldown = System.nanoTime() + 5_000_000_000L;
+				return null;
+			}
 			LOGGER.error("Pyridium: LOD-Stufe {} nicht verfuegbar", lod, e);
 			this.failed.put(lod, String.valueOf(e));
 			return null;
+		}
+	}
+
+	/** frueheste Zeit (nanoTime) fuer den naechsten Versuch nach Speichermangel */
+	private long oomCooldown;
+
+	/** Strukturen im LOD (einmal je Welt aufgebaut; null, wenn nicht verfuegbar) */
+	private LodStructures structures() {
+		if (!this.structuresTried) {
+			this.structuresTried = true;
+			if (this.server != null) {
+				this.structures = LodStructures.create(this.gpu, this.server, this.rs, this.settings, this.biomes, this.seed, this.minY, this.height, this.sea);
+			}
+		}
+		return this.structures;
+	}
+
+	/** Echte Oberflaechenregeln (Datapack) fuer alle Stufen: einmal aufbauen; bei Fehlern bleibt die Biomtabelle */
+	private void ensureSurface() {
+		if (this.surfaceTried) {
+			return;
+		}
+		this.surfaceTried = true;
+		if (Boolean.getBoolean("pyridium.lodNoSurfaceRules")) {
+			return;
+		}
+		try {
+			ExactLodSurface sf = new ExactLodSurface(this.gpu, this.rs, this.settings, this.genCtx, this.biomes, this.minY, this.height, this.seed);
+			if (!sf.unsupported.isEmpty()) {
+				LOGGER.warn("Pyridium: Oberflaechenregeln im LOD nicht exakt ({}): Biomtabelle", sf.unsupported);
+				return;
+			}
+			ExactOres ores = new ExactOres(this.biomes, this.genCtx);
+			this.oreTable = ores.count > 0 ? ores.table : null;
+			it.unimi.dsi.fastutil.ints.IntLinkedOpenHashSet all = new it.unimi.dsi.fastutil.ints.IntLinkedOpenHashSet(sf.stateIds);
+			for (int id : ores.stateIds) {
+				all.add(id);
+			}
+			int[] stateIds = all.toIntArray();
+			LOGGER.info("Pyridium: LOD mit {} Erz-Features aus den Biomen", ores.count);
+			int n = stateIds.length, nb = Math.max(1, this.biomes.biomes.size());
+			int[] t = new int[2 + 3 * n + nb];
+			t[0] = n;
+			t[1] = nb;
+			for (int i = 0; i < n; i++) {
+				BlockState st = net.minecraft.world.level.block.Block.BLOCK_STATE_REGISTRY.byId(stateIds[i]);
+				t[2 + i * 3] = stateIds[i];
+				t[3 + i * 3] = st == null ? 0 : BlockPalette.attrOf(st);
+				// nur Gras faerbt sich nach dem Biom (verschneites Gras bleibt unveraendert)
+				t[4 + i * 3] = st != null && st.is(Blocks.GRASS_BLOCK) && !st.getValue(net.minecraft.world.level.block.state.properties.BlockStateProperties.SNOWY) ? 1 : 0;
+			}
+			for (int b = 0; b < this.biomes.biomes.size(); b++) {
+				t[2 + 3 * n + b] = BlockPalette.attr(0, this.biomes.biomes.get(b).value().getGrassColor(0, 0) & 0xffffff) & 0xffff0000;
+			}
+			this.surface = sf;
+			this.surfaceTable = t;
+			LOGGER.info("Pyridium: LOD mit echten Oberflaechenregeln ({} Block-Zustaende)", n);
+		} catch (Exception e) {
+			LOGGER.warn("Pyridium: Oberflaechenregeln im LOD nicht verfuegbar, Biomtabelle", e);
 		}
 	}
 
@@ -705,95 +929,32 @@ public final class LodGenerator {
 			String id = h.unwrapKey().map(k -> k.identifier().getPath()).orElse("plains");
 			Biome b = h.value();
 			int grass = b.getGrassColor(0, 0) & 0xffffff, foliage = b.getFoliageColor() & 0xffffff;
-			BlockState top = Blocks.GRASS_BLOCK.defaultBlockState(), filler = Blocks.DIRT.defaultBlockState(), under = Blocks.DIRT.defaultBlockState();
+			// Keine Biomnamen-Heuristik: Oberflaechenmaterial kommt aus den SurfaceRules des Datapacks (wg_lod_surface.cu). Diese Tabelle ist
+			// nur der neutrale Rueckfall (Standardgestein), falls die Regeln nicht kompilierbar waeren.
+			BlockState top = Blocks.STONE.defaultBlockState(), filler = top, under = top;
 			BlockState leaves = Blocks.OAK_LEAVES.defaultBlockState(), log = Blocks.OAK_LOG.defaultBlockState();
-			float trees = 0.0005f;
-			boolean tintTop = true, tintLeaves = true;
-			if (id.contains("desert")) {
-				top = filler = under = Blocks.SAND.defaultBlockState();
-				trees = 0;
-			} else if (id.contains("badlands")) {
-				top = Blocks.RED_SAND.defaultBlockState();
-				filler = Blocks.TERRACOTTA.defaultBlockState();
-				under = Blocks.RED_SAND.defaultBlockState();
-				trees = id.contains("wooded") ? 0.004f : 0;
-			} else if (id.contains("beach") || id.equals("river") || id.contains("ocean")) {
-				top = filler = Blocks.SAND.defaultBlockState();
-				under = id.contains("deep") || id.contains("cold") ? Blocks.GRAVEL.defaultBlockState() : Blocks.SAND.defaultBlockState();
-				if (id.contains("frozen") || id.contains("snowy")) {
-					top = Blocks.SNOW_BLOCK.defaultBlockState();
+			float trees = 0f;
+			boolean tintTop = false, tintLeaves = true;
+			// Baeume aus den Features des Datapacks (VEGETAL_DECORATION) statt aus dem Namen; ueberschreibt die Namensschaetzung
+			ExactVegetation veg = ExactVegetation.of(b);
+			trees = veg.treesPerBlock();
+			if (veg.leaves() != null) {
+				leaves = veg.leaves();
+				if (veg.log() != null) {
+					log = veg.log();
 				}
-				trees = 0;
-			} else if (id.contains("mushroom")) {
-				top = Blocks.MYCELIUM.defaultBlockState();
-				tintTop = false;
-				trees = 0.002f;
-			} else if (id.contains("peaks") || id.contains("jagged") || id.contains("frozen") || id.contains("snowy_slopes")) {
-				top = Blocks.SNOW_BLOCK.defaultBlockState();
-				filler = Blocks.STONE.defaultBlockState();
-				trees = 0;
-			} else if (id.contains("stony")) {
-				top = filler = Blocks.STONE.defaultBlockState();
-				trees = 0;
-			} else if (id.contains("snowy") || id.contains("ice") || id.contains("grove")) {
-				top = Blocks.GRASS_BLOCK.defaultBlockState().setValue(net.minecraft.world.level.block.state.properties.BlockStateProperties.SNOWY, true);
-				tintTop = false;
-				trees = id.contains("taiga") || id.contains("grove") ? 0.02f : 0.0003f;
-				leaves = Blocks.SPRUCE_LEAVES.defaultBlockState();
-				log = Blocks.SPRUCE_LOG.defaultBlockState();
-				foliage = 0x619961;
-			} else if (id.contains("swamp") || id.contains("mangrove")) {
-				under = Blocks.MUD.defaultBlockState();
-				trees = 0.01f;
-				if (id.contains("mangrove")) {
-					leaves = Blocks.MANGROVE_LEAVES.defaultBlockState();
-					log = Blocks.MANGROVE_LOG.defaultBlockState();
+				net.minecraft.world.level.block.Block lb = leaves.getBlock();
+				tintLeaves = true;
+				foliage = b.getFoliageColor() & 0xffffff;
+				if (lb == Blocks.BIRCH_LEAVES) {
+					foliage = 0x80A755; // Vanilla: feste Birkenfarbe
+				} else if (lb == Blocks.SPRUCE_LEAVES) {
+					foliage = 0x619961; // Vanilla: feste Fichtenfarbe
+				} else if (lb == Blocks.MANGROVE_LEAVES) {
 					foliage = 0x8DB127;
-					trees = 0.04f;
+				} else if (lb == Blocks.CHERRY_LEAVES || lb == Blocks.PALE_OAK_LEAVES || lb == Blocks.AZALEA_LEAVES || lb == Blocks.FLOWERING_AZALEA_LEAVES) {
+					tintLeaves = false;
 				}
-			}
-			if (id.contains("taiga")) {
-				leaves = Blocks.SPRUCE_LEAVES.defaultBlockState();
-				log = Blocks.SPRUCE_LOG.defaultBlockState();
-				foliage = 0x619961; // Vanilla: feste Fichtenfarbe
-				trees = Math.max(trees, 0.025f);
-				if (id.contains("old_growth")) {
-					top = Blocks.PODZOL.defaultBlockState();
-					tintTop = false;
-				}
-			} else if (id.contains("birch")) {
-				leaves = Blocks.BIRCH_LEAVES.defaultBlockState();
-				log = Blocks.BIRCH_LOG.defaultBlockState();
-				foliage = 0x80A755; // Vanilla: feste Birkenfarbe
-				trees = 0.03f;
-			} else if (id.contains("dark_forest")) {
-				leaves = Blocks.DARK_OAK_LEAVES.defaultBlockState();
-				log = Blocks.DARK_OAK_LOG.defaultBlockState();
-				trees = 0.06f;
-			} else if (id.contains("pale_garden")) {
-				leaves = Blocks.PALE_OAK_LEAVES.defaultBlockState();
-				log = Blocks.PALE_OAK_LOG.defaultBlockState();
-				tintLeaves = false;
-				trees = 0.06f;
-			} else if (id.contains("jungle")) {
-				leaves = Blocks.JUNGLE_LEAVES.defaultBlockState();
-				log = Blocks.JUNGLE_LOG.defaultBlockState();
-				trees = id.contains("sparse") ? 0.01f : 0.05f;
-			} else if (id.contains("savanna")) {
-				leaves = Blocks.ACACIA_LEAVES.defaultBlockState();
-				log = Blocks.ACACIA_LOG.defaultBlockState();
-				trees = 0.003f;
-			} else if (id.contains("cherry")) {
-				leaves = Blocks.CHERRY_LEAVES.defaultBlockState();
-				log = Blocks.CHERRY_LOG.defaultBlockState();
-				tintLeaves = false;
-				trees = 0.02f;
-			} else if (id.contains("forest")) {
-				trees = 0.035f;
-			} else if (id.contains("windswept")) {
-				trees = id.contains("forest") ? 0.03f : 0.004f;
-			} else if (id.contains("meadow")) {
-				trees = 0.001f;
 			}
 			int o = i * 8;
 			t[o] = tint(BlockPalette.attrOf(top), tintTop ? grass : -1);

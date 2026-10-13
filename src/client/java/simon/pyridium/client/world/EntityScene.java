@@ -97,6 +97,7 @@ public final class EntityScene {
             poses.popPose();
         }
         if (instances == null) instances = MemoryUtil.memAlloc(64 * 256);
+        LodStructureLayer.renderHook(camera, renderPosition);   // Strukturschicht des LOD (eigene Instanzen, siehe LodStructureLayer)
         Native.modelsFrame(MemoryUtil.memAddress(instances), instanceCount);
         IDENTITIES.entrySet().removeIf(e -> frame - e.getValue().seen > 120);
         // Native instances expire after 120 unseen frames. Evict later so an
@@ -348,6 +349,17 @@ public final class EntityScene {
     private static float distance(Vertex a, Vertex b) {
         float x = a.x - b.x, y = a.y - b.y, z = a.z - b.z;
         return (float)Math.sqrt(x * x + y * y + z * z);
+    }
+
+    /** Strukturschicht: Instanz mit fertiger Zeilen-3x4-Matrix (Render-Ursprung bereits abgezogen) */
+    static void appendExternal(long id, long geometry, float[] m) {
+        if (instanceCount >= MAX_MODEL_PARTS) return;
+        if (instances == null) instances = MemoryUtil.memAlloc(64 * 256);
+        if ((instanceCount + 1) * 64 > instances.capacity()) instances = MemoryUtil.memRealloc(instances, instances.capacity() * 2);
+        int o = instanceCount++ * 64;
+        instances.putLong(o, id);
+        instances.putLong(o + 8, geometry);
+        for (int i = 0; i < 12; i++) instances.putFloat(o + 16 + i * 4, m[i]);
     }
 
     private static void append(long id, long geometry, Matrix4f m) {
