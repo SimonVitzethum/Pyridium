@@ -280,6 +280,12 @@ public final class LodGenerator {
 	private volatile boolean stop;
 	private long prefetched, hits, misses;
 	private int missLog;
+	// Pipelined Cache-Statistik: der Zähler-Download des Vorauftrags wird erst
+	// zu Beginn des nächsten Auftrags ausgewertet (mit Warten, das dann fast
+	// nie wartet, weil die GPU den Frame längst weiter gerechnet hat). Nur
+	// Heuristik (ST_EMPTY/ST_NODATA); Voxeldaten sind davon nie betroffen.
+	private java.util.List<int[]> pendingStats;
+	private int pendingStatsCount;
 
 	private static long key(int lod, int x, int y, int z) {
 		return (long)lod << 58 | ((long)(y & 0xfff)) << 46 | ((long)(x & 0x7fffff)) << 23 | (z & 0x7fffff);
@@ -624,6 +630,19 @@ public final class LodGenerator {
 		java.util.List<int[]> miss = new java.util.ArrayList<>();
 		java.util.List<int[]> all = new java.util.ArrayList<>();
 		this.allocBasic();
+		// Vorauftrag drainen: Zähler-Download auswerten, den der Vorauftrag nur
+		// eingereiht hat. Das Warten kehrt fast immer sofort zurück, weil die
+		// GPU seither den Frame weiter gerechnet hat (kein Stall im heißen Pfad).
+		if (this.pendingStats != null) {
+			this.gpu.sync();
+			MemorySegment phc = MemorySegment.ofAddress(this.hostCounts[1]).reinterpret((long)this.pendingStatsCount * 4L);
+			for (int[] pr : this.pendingStats) {
+				int c = phc.get(ValueLayout.JAVA_INT, (long)pr[4] * 4L);
+				Entry pe = this.cache.computeIfAbsent(key(pr[0], pr[1], pr[2], pr[3]), q -> new Entry());
+				pe.state = c == 0 ? ST_EMPTY : ST_NODATA;
+			}
+			this.pendingStats = null;
+		}
 		long hostOne = this.hostOne[1];
 		int nHit = 0;
 		for (int i = 0; i < count; i++) {
@@ -673,16 +692,16 @@ public final class LodGenerator {
 		long t0 = System.nanoTime();
 		this.genKeys(miss, voxels, counts, capacity);
 		this.gpu.sync();
-		// leer / nicht leer merken (der Vorausgenerator steigt daran ab)
+		// leer / nicht leer merken (der Vorausgenerator steigt daran ab): nur
+		// einreihen, Auswertung im nächsten Auftrag (siehe oben). Der Upcall
+		// kehrt damit zurück, sobald die Voxelkerne eingereiht sind, statt auf
+		// PCIe-Rückfluss plus zweites Warten zu blockieren.
 		if (!miss.isEmpty() && count <= 4096) {
 			this.gpu.downloadAsync(this.hostCounts[1], counts, count * 4L);
-			this.gpu.sync();
-			MemorySegment hc = MemorySegment.ofAddress(this.hostCounts[1]).reinterpret(count * 4L);
-			for (int[] r : miss) {
-				int c = hc.get(ValueLayout.JAVA_INT, r[4] * 4L);
-				Entry e = this.cache.computeIfAbsent(key(r[0], r[1], r[2], r[3]), q -> new Entry());
-				e.state = c == 0 ? ST_EMPTY : ST_NODATA;
-			}
+			this.pendingStats = miss;
+			this.pendingStatsCount = count;
+		} else {
+			this.pendingStats = null;
 		}
 		this.calls++;
 		this.ms += (System.nanoTime() - t0) / 1e6;

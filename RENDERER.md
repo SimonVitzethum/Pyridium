@@ -445,3 +445,33 @@ Spieleroptionen und echte Renderer-Konfiguration wurden nicht geändert.
   orientierter Himmel). Eigener CUDA-Code, keine Uebernahme von GLSL.
 - Test-Hilfen: `-Dpyridium.camYawRate`, `-Dpyridium.camSpeed` (wandernde Testkamera),
   `PYRIDIUM_TEST_MODE`, `PYRIDIUM_TEST_SHOT_EVERY` in `tools/check_renderer.sh`.
+
+### Runde 3: Caching bei vollem Path Tracing, CPU stallt die GPU nie
+
+Grundsatz: Der Render-Steady-State enthält keinen einzigen CPU-GPU-Sync und
+keinen Readback (nur Launches und streamgeordnete Kopien; Syncs nur bei
+Auflösungswechsel, Up-/Teardown und Diagnose). Die CPU fragt nichts ab, die
+GPU läuft nie leer. Verbleibende Syncs sind belegt: Upcall-Grenze
+(`LodGenerator.run`, nativ liest danach), GAS-Kompaktierung (nur Anlegen),
+Staging-Umlauf, explizite Diagnose (`PYRIT_REPLAY_STATS`, `reportHistory`).
+
+- **GI-Cache (`PYRIT_GI_EVERY=N`, Standard 1):** GI-Durchgang nur jeden
+  N-ten Frame neu; dazwischen gilt der zeitliche Verlauf weiter
+  (`giShouldRun` in `native/pyrit/src/device/cache.zig`, Zähler `gi_tick` je
+  Ansicht). Kein Strahl entfällt, nur Wiederverwendung; Geometrieänderung oder
+  fehlender Verlauf rechnen immer. Kombinieren läuft unverändert.
+- **Statischer Frame-Reuse (`PYRIT_STATIC_REUSE=1`, opt-in):** Kamera ohne
+  Jitter, Auflösung, Render-Schalter, Szene (`scene_seq` aus dem Commit),
+  Licht und GI-Modus unverändert und kein Jitter → alle Endpuffer werden per
+  DtoD auf dem Stream kopiert (ca. 84 B/Pixel Cache), kein Kernel, kein
+  Warten. Greift bei wirklich stehender Szene (Zeit eingefroren, keine
+  Animation/Edits); bei Jitter oder Bewegung inaktiv. Feststehende
+  Abtastung statt Konvergenz ist der dokumentierte Preis des Opt-ins.
+- **Pipelined LOD-Statistik:** der Zähler-Download pro LOD-Batch wird nur
+  noch eingereiht und erst zu Beginn des nächsten Auftrags ausgewertet
+  (`pendingStats` in `LodGenerator.java`); der Upcall kehrt zurück, sobald die
+  Voxelkerne eingereiht sind. Reine Heuristik (ST_EMPTY/ST_NODATA), ein Batch
+  verzögert, Voxeldaten unberührt.
+- Tests: `zig build test` (66 Tests, +3 für `parseGiEvery`/`giShouldRun`,
+  Kamera-Reuse, Reprojektions-Match) und `./gradlew compileClientJava`.
+  GPU-Ersparnis noch nicht vermessen (Einzellauf steht aus).
