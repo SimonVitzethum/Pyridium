@@ -49,7 +49,7 @@ export fn __raygen__slots() callconv(.nvptx_kernel) void {
         var p = [4]u32{ @bitCast(types.flt_max), types.no_hit, 0, @intFromBool(ray.flags & types.trace_skip_transparent != 0) };
         if (prm.handle != 0) common.tracePolicy(prm.handle, ray.o, ray.d, ray.tmin, ray.tmax, ray.mask, ray.flags, &p);
         @as([*]types.ReplayHit, @ptrFromInt(rp.hits))[k] = .{ .t = @bitCast(p[0]), .instance = p[1], .attribute = p[2], .face = p[3] };
-        @as([*]u32, @ptrFromInt(rp.state))[k] = 2;
+        @as([*]u32, @ptrFromInt(rp.state))[k] = (rp.epoch << 2) | 2;
     }
 }
 

@@ -93,4 +93,5 @@ The documentation is in German.
 
 ## License
 
-Not decided yet.
+GPL-3.0-or-later, as part of Pyridium (see the `LICENSE` file in the repository root). The NVIDIA DLSS SDK is
+not part of this repository and keeps its own licence.

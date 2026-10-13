@@ -316,7 +316,7 @@ typedef struct PyrLighting {
     float    camera_medium_scatter[3];
     float    camera_medium_top;
     float    env_ambient[3];    /* mittlere Strahldichte der Karte; setzt pyr_environment_set */
-    uint32_t reserved[1];
+    float    wetness;           /* Nässe 0..1 (LabPBR-Porosität); 0 = trocken */
 
     PyrLight lights[PYR_MAX_LIGHTS];
 } PyrLighting;

@@ -193,7 +193,7 @@ pub fn renderPixelWith(tracer: anytype, p: *const types.RenderParams, s: *const 
 
     if (p.color != 0 or p.normal != 0 or p.albedo != 0) {
         if (found) |h| {
-            var rng = shade.Rng.init(x, y, p.frame_index, 0);
+            var rng = shade.Rng.initStratified(x, y, p.frame_index, 0, p.flags & types.render_plain_rng != 0);
             // Deckungsabtastung gegen wandernde Kanten
             //
             // Die Ursache ist nicht das Rauschen, sondern die Deckung: an
@@ -472,7 +472,7 @@ pub fn giPixel(tracer: anytype, p: *const types.RenderParams, s: *const types.Sc
     const ps = if (l.secondary_bias > 0) pw + n * vec.splat(l.secondary_bias * hit.t) else pw;
     const opaque_mask = p.ray_mask & ~p.transparent_mask;
     const mask = if (p.secondary_mask != 0) p.secondary_mask else opaque_mask;
-    var rng = shade.Rng.init(c[0], c[1], p.frame_index, 2);
+    var rng = shade.Rng.initStratified(c[0], c[1], p.frame_index, 2, p.flags & types.render_plain_rng != 0);
     var li = shade.indirect(tracer, s, l, ps, n, &rng, mask, p.ray_mask & p.transparent_mask);
     // Himmelslicht (nächstes Ereignis) ebenfalls hier, in halber Auflösung –
     // die volle Auflösung lässt es dafür weg (shadeHit)

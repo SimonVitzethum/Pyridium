@@ -14,6 +14,7 @@ const cuda = @import("cuda.zig");
 const dag_builder = @import("dag_builder.zig");
 const xform = @import("xform.zig");
 const diag = @import("diag.zig");
+const pack = @import("pack.zig");
 const RangeAlloc = @import("range_alloc.zig").RangeAlloc;
 const Rt = @import("rt.zig").Rt;
 const rt_prims = @import("rt_prims.zig");
@@ -94,6 +95,7 @@ const ViewSlot = struct {
     post_buf: [6]cuda.CUdeviceptr = .{ 0, 0, 0, 0, 0, 0 },
     /// Helligkeitsmomente je Parität und Varianz (Akkumulation + Filter-Pingpong)
     post_mom: [2]cuda.CUdeviceptr = .{ 0, 0 },
+    post_alb: [2]cuda.CUdeviceptr = .{ 0, 0 },
     /// Kamera- und Bildeffekte: zwei HDR-Puffer, Bewegung/Tiefe, Bloom-Pyramide,
     /// Belichtungszustand (bleibt über Frames stehen)
     fx_buf: [2]cuda.CUdeviceptr = .{ 0, 0 },
@@ -250,6 +252,8 @@ pub const Context = struct {
     fn_fx_bloom_pre: cuda.CUfunction = null,
     fn_fx_bloom_down: cuda.CUfunction = null,
     fn_fx_bloom_up: cuda.CUfunction = null,
+    fn_bake_sky: cuda.CUfunction = null,
+    fn_bake_sun: cuda.CUfunction = null,
     fn_fx_expose_scan: cuda.CUfunction = null,
     fn_fx_expose_apply: cuda.CUfunction = null,
     fn_fx_resolve: cuda.CUfunction = null,
@@ -522,11 +526,23 @@ pub const Context = struct {
         // gegen Auslagerung abwägen)
         const maxreg: usize = if (std.c.getenv("PYRIT_MAXREG")) |e| (std.fmt.parseInt(usize, std.mem.span(e), 10) catch 0) else 0;
         const opts = [_]c_int{ cuda.CU_JIT_ERROR_LOG_BUFFER, cuda.CU_JIT_ERROR_LOG_BUFFER_SIZE_BYTES, 0 };
-        var vals = [_]?*anyopaque{ @ptrCast(&err_log), @ptrFromInt(err_log.len), @ptrFromInt(maxreg) };
+        const vals = [_]?*anyopaque{ @ptrCast(&err_log), @ptrFromInt(err_log.len), @ptrFromInt(maxreg) };
         const n_opts: c_uint = if (maxreg > 0) 3 else 2;
-        const r = self.drv.cuModuleLoadDataEx(&self.module, ptx.ptr, n_opts, &opts, &vals);
+        _ = n_opts;
+        _ = opts;
+        _ = vals;
+        // Shaderpack bauen (Pack, Standardpack oder Notfall) und mit den Kernels linken
+        const pack_ptx = pack.buildWithFallback(self.gpa) orelse
+            return fail(error.Compile, "Shaderpack: {s}", .{pack.message()});
+        defer self.gpa.free(pack_ptx);
+        var new_module: cuda.CUmodule = null;
+        const r = pack.linkModule(&self.drv, ptx, pack_ptx, &new_module, &err_log);
         if (r != cuda.CUDA_SUCCESS)
-            return fail(error.Compile, "PTX laden: {s}\n{s}", .{ self.drv.errorString(r), std.mem.sliceTo(&err_log, 0) });
+            return fail(error.Compile, "Kernels linken: {s}\n{s}", .{ self.drv.errorString(r), std.mem.sliceTo(&err_log, 0) });
+        const old_module = self.module;
+        self.module = new_module;
+        pack.uploadOptions(&self.drv, self.module);
+        if (old_module != null) _ = self.drv.cuModuleUnload(old_module);
         try self.check(self.drv.cuModuleGetFunction(&self.fn_update, self.module, "pyr_k_update_instances"), "cuModuleGetFunction");
         try self.check(self.drv.cuModuleGetFunction(&self.fn_render, self.module, "pyr_k_render"), "cuModuleGetFunction");
         try self.check(self.drv.cuModuleGetFunction(&self.fn_trace, self.module, "pyr_k_trace"), "cuModuleGetFunction");
@@ -553,6 +569,8 @@ pub const Context = struct {
         try self.check(self.drv.cuModuleGetFunction(&self.fn_fg_splat_mv, self.module, "pyr_k_fg_splat_mv"), "cuModuleGetFunction");
         try self.check(self.drv.cuModuleGetFunction(&self.fn_build, self.module, "pyr_k_build"), "cuModuleGetFunction");
         inline for (.{
+            .{ "fn_bake_sky", "pyr_k_bake_sky" },
+            .{ "fn_bake_sun", "pyr_k_bake_sun" },
             .{ "fn_fx_pack_mvd", "pyr_k_fx_pack_mvd" },
             .{ "fn_fx_dof", "pyr_k_fx_dof" },
             .{ "fn_fx_motion", "pyr_k_fx_motion" },
@@ -576,6 +594,38 @@ pub const Context = struct {
                 }
             }
         }
+    }
+
+    /// Heißladen: Pack neu bauen und Kernels neu linken (rebuild) oder nur die
+    /// Optionswerte in das Modul schreiben.
+    pub fn reloadPack(self: *Context, rebuild: bool) Error!void {
+        try self.check(self.drv.cuStreamSynchronize(self.stream), "cuStreamSynchronize");
+        if (self.post_stream != null) try self.check(self.drv.cuStreamSynchronize(self.post_stream), "cuStreamSynchronize");
+        if (!rebuild) {
+            pack.uploadOptions(&self.drv, self.module);
+            return;
+        }
+        try self.loadKernels();
+    }
+
+    /// Himmel mit den Pack-Stages "sky" und "sun" backen und als Umgebungskarte
+    /// setzen. `sun`: Richtung zur Sonne (normiert) und Beleuchtungsstärke.
+    /// Liefert die Sonnenfarbe am Boden (für Lighting.sun_color).
+    pub fn bakeSky(self: *Context, w: u32, h: u32, sun: [4]f32) Error![3]f32 {
+        const n = @as(usize, w) * h;
+        const bytes = (n + 1) * 16;
+        const dev = try self.devAlloc(bytes, "Himmel backen");
+        defer _ = self.drv.cuMemFree_v2(dev);
+        var p = types.BakeSkyParams{ .out = dev, .width = w, .height = h, .sun = sun };
+        const params = [_]?*anyopaque{@ptrCast(&p)};
+        try self.launch(self.fn_bake_sky, .{ @intCast((n + 255) / 256), 1, 1 }, .{ 256, 1, 1 }, &params);
+        try self.launch(self.fn_bake_sun, .{ 1, 1, 1 }, .{ 32, 1, 1 }, &params);
+        const host = try oom(self.gpa.alloc(f32, (n + 1) * 4));
+        defer self.gpa.free(host);
+        try self.check(self.drv.cuStreamSynchronize(self.activeStream()), "cuStreamSynchronize");
+        try self.check(self.drv.cuMemcpyDtoH_v2(host.ptr, dev, bytes), "cuMemcpyDtoH");
+        try self.setEnvironment(w, h, host[0 .. n * 4]);
+        return .{ host[n * 4], host[n * 4 + 1], host[n * 4 + 2] };
     }
 
     pub fn destroy(self: *Context) void {
@@ -1922,7 +1972,8 @@ pub const Context = struct {
             .prev = if (prev_ok) v.before else cur,
             .history_valid = @intFromBool(prev_ok),
             .ray_mask = if (targets.ray_mask == 0) 0xFFFFFFFF else targets.ray_mask,
-            .flags = targets.flags | (if (std.c.getenv("PYRIT_DEBUG_OLD_PRIMARY") != null) @as(u32, 0x8000_0000) else 0),
+            .flags = targets.flags | (if (std.c.getenv("PYRIT_DEBUG_OLD_PRIMARY") != null) @as(u32, 0x8000_0000) else 0) |
+                (if (std.c.getenv("PYRIT_PLAIN_RNG") != null) types.render_plain_rng else 0),
             .detail_scale = if (targets.detail_scale >= 1) targets.detail_scale else 1,
             .hits = targets.hits,
             .depth = targets.depth,
@@ -2377,6 +2428,10 @@ pub const Context = struct {
             if (b.* != 0) _ = drv.cuMemFree_v2(b.*);
             b.* = 0;
         }
+        for (&v.post_alb) |*b| {
+            if (b.* != 0) _ = drv.cuMemFree_v2(b.*);
+            b.* = 0;
+        }
         v.post_w = 0;
         v.post_h = 0;
         v.post_valid = false;
@@ -2402,6 +2457,7 @@ pub const Context = struct {
         for (&v.post_buf) |*b| b.* = try self.devAlloc(@as(u64, w) * h * 8, "Nachbearbeitung");
         // Momente (2 x f16) und Varianz (f16) für die varianzgeführte Filterung
         for (&v.post_mom) |*b| b.* = try self.devAlloc(@as(u64, w) * h * 4, "Nachbearbeitung");
+        for (&v.post_alb) |*b| b.* = try self.devAlloc(@as(u64, w) * h * 8, "Nachbearbeitung");
         for (&v.post_var) |*b| b.* = try self.devAlloc(@as(u64, w) * h * 2, "Nachbearbeitung");
         v.post_w = w;
         v.post_h = h;
@@ -2438,8 +2494,8 @@ pub const Context = struct {
         v.fx_mvd = try self.devAlloc(n * 16, "Bildeffekte: Bewegung und Tiefe");
         // Belichtung: 2 x u32 Zähler, 2 x f32 Zustand. Der Zustand überlebt
         // Frames, deshalb hier auf 0 setzen (0 = noch keine Messung).
-        v.fx_expose = try self.devAlloc(16, "Bildeffekte: Belichtung");
-        try self.check(self.drv.cuMemsetD8Async(v.fx_expose, 0, 16, self.stream), "cuMemsetD8Async");
+        v.fx_expose = try self.devAlloc(2048, "Bildeffekte: Belichtung");
+        try self.check(self.drv.cuMemsetD8Async(v.fx_expose, 0, 2048, self.stream), "cuMemsetD8Async");
         var lw = @max(w / 2, 1);
         var lh = @max(h / 2, 1);
         var i: u32 = 0;
@@ -2574,7 +2630,7 @@ pub const Context = struct {
 
         if (fx.flags & api.postfx_auto_exposure != 0) {
             p.expose_acc = v.fx_expose;
-            p.expose_state = v.fx_expose + 8;
+            p.expose_state = v.fx_expose + 1536;
             p.expose_speed = if (fx.exposure_speed > 0) fx.exposure_speed else 0.05;
             p.expose_min = if (fx.exposure_min > 0) fx.exposure_min else 0.03;
             p.expose_max = if (fx.exposure_max > 0) fx.exposure_max else 30;
@@ -2728,6 +2784,10 @@ pub const Context = struct {
             p.hist_moments = v.post_mom[prev];
             p.out_moments = v.post_mom[cur];
             p.out_var = v.post_var[0];
+        }
+        if (std.c.getenv("PYRIT_POST_NOALBEDO") == null) {
+            p.hist_albedo = v.post_alb[prev];
+            p.out_albedo = v.post_alb[cur];
         }
         p.phi_lum = if (info.denoise_phi > 0) info.denoise_phi else 4.0;
         // Diagnose-Schalter; die Vorgaben sind gemessen (siehe post.zig)
@@ -3218,7 +3278,7 @@ pub const Context = struct {
     }
 };
 
-const GpuTiming = struct {
+pub const GpuTiming = struct {
     ev: [512]cuda.CUevent = .{null} ** 512,
     names: [512][]const u8 = undefined,
     n: usize = 0,
@@ -3240,7 +3300,20 @@ const GpuTiming = struct {
         t.sums += 1;
     }
 
+    /// Letzter Bericht als Text (Java liest ihn über pyd_timing_report, da
+    /// stderr im Gradle-Lauf verloren geht)
+    pub var text: [4096]u8 = undefined;
+    pub var text_len: usize = 0;
+    pub var stats: [1024]u8 = undefined;
+    pub var stats_len: usize = 0;
+
     fn report(t: *GpuTiming) void {
+        var w = std.Io.Writer.fixed(&text);
+        w.print("GPU-Zeit je Frame ({d}):", .{t.frames}) catch {};
+        for (t.sum_names[0..t.sums], t.sum_ms[0..t.sums]) |nm, ms| w.print("  {s} {d:.2}", .{ nm, ms / @as(f64, @floatFromInt(t.frames)) }) catch {};
+        w.writeAll(" ms") catch {};
+        if (stats_len > 0) w.print(" || {s}", .{stats[0..stats_len]}) catch {};
+        text_len = w.buffered().len;
         std.debug.print("[pyrit] GPU-Zeit je Frame (Mittel über {d}):", .{t.frames});
         for (t.sum_names[0..t.sums], t.sum_ms[0..t.sums]) |nm, ms| std.debug.print("  {s} {d:.2}", .{ nm, ms / @as(f64, @floatFromInt(t.frames)) });
         std.debug.print(" ms\n", .{});

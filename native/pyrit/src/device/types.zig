@@ -455,7 +455,9 @@ pub const Lighting = extern struct {
     /// Mittlere Strahldichte der Umgebungskarte über die ganze Kugel;
     /// setzt pyr_environment_set, nicht der Aufrufer (Streulicht im Dunst)
     env_ambient: [3]f32,
-    reserved: [1]u32,
+    /// Nässe 0..1 (Regen, Wasser auf Oberflächen): LabPBR-Porosität dunkelt
+    /// poröse Flächen ab, alle Flächen werden glatter. 0 = trocken, kostet nichts.
+    wetness: f32,
     lights: [max_lights]Light,
 };
 
@@ -673,8 +675,12 @@ pub const ReplayParams = extern struct {
     /// 0 = nach der ersten offenen Anfrage eines Pixels keine weiteren
     /// Strahlen eintragen (sie hingen von einem noch unbekannten Treffer ab)
     speculate: u32,
-    /// Diagnostic counters and final fixed-budget output. Same ABI size.
+    /// Diagnostic counters and final fixed-budget output.
     flags: u32 = 0,
+    /// Zustandsstempel: Zustand = (epoch << 2) | {1 angefragt, 2 beantwortet}.
+    /// Jeder Streifen bekommt eine neue Epoche, die Zustandsfelder müssen also
+    /// nicht mehr je Streifen gelöscht werden (spart ~100 Byte je Pixel Schreiblast).
+    epoch: u32 = 0,
 };
 
 pub const replay_diagnostics: u32 = 1;
@@ -828,6 +834,21 @@ pub const PostParams = extern struct {
     /// Höchstzahl gemittelter Frames auf Voxelkanten (dort mittelt der Jitter
     /// zwei Flächen; lange Mittelung würde nachziehen)
     edge_frames: f32,
+    /// Akkumuliertes Albedo (f16 x4, a = Anzahl): der Entrauscher mittelt auch die
+    /// Textur über die Jitter-Positionen, sonst flackern Texelkanten. 0 = aus.
+    hist_albedo: u64 = 0,
+    out_albedo: u64 = 0,
+};
+
+/// Diagnose: gewöhnlicher Hash statt geschichteter Zufallsdimensionen (PYRIT_PLAIN_RNG)
+pub const render_plain_rng: u32 = 0x4000_0000;
+
+/// Himmel backen (Shaderpack-Stages sky/sun): out = Karte (w*h float4), danach Sonnenfarbe
+pub const BakeSkyParams = extern struct {
+    out: u64,
+    width: u32,
+    height: u32,
+    sun: [4]f32,
 };
 
 pub const tonemap_aces: u32 = 0;

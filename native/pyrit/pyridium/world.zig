@@ -152,6 +152,7 @@ fn ensureTargets(ow: u32, oh: u32) bool {
     S.frame = 0;
     S.resolution.average_ms = 0;
     S.resolution.samples = 0;
+    std.debug.print("[pyridium] Renderziele: {d}x{d} intern -> {d}x{d} Ausgabe; Modus {s}\n", .{ rw, rh, ow, oh, @tagName(S.mode) });
     return true;
 }
 
@@ -501,6 +502,11 @@ export fn pyd_world_configure(px: f32, view_chunks: u32, target_fps: f32) i32 {
     return 0;
 }
 
+/// Simulationsbereich um den Spieler (Chunk x/z, Radius in Chunks): dort wird nie Fernbereich berechnet
+export fn pyd_set_sim_area(cx: i32, cz: i32, radius: i32) void {
+    sections.setSimArea(cx, cz, radius);
+}
+
 export fn pyd_world_set_mode(mode: u32) void {
     const m: Mode = @enumFromInt(@min(mode, 4));
     if (m == S.mode) return;
@@ -532,7 +538,9 @@ fn camera(c: *const CamIn, cam: *types.Camera, w: u32, h: u32) void {
     pyrit.pyr_camera_look_at(cam, &eye, &target, &c.up);
     pyrit.pyr_camera_perspective(cam, c.fov_y, w, h, 0.05);
     cam.jitter = .{ 0, 0 };
-    if (S.mode != .native) pyrit.pyr_jitter_halton(S.frame, &cam.jitter);
+    // Auch nativ jittern: der zeitliche Verlauf des Entrauschers mittelt die
+    // Subpixelpositionen zu Kantenglättung (eigenes TAA ohne TAAU-Durchgang).
+    if (S.mode != .native or std.c.getenv("PYRIT_NATIVE_NOJITTER") == null) pyrit.pyr_jitter_halton(S.frame, &cam.jitter);
 }
 
 /// Einen Frame der Welt in c.target rendern
@@ -628,4 +636,44 @@ export fn pyd_world_plan_info(out: *[11]f64) i32 {
 
 export fn pyd_world_stats(out: *api.WorldStats) void {
     if (S.ready) _ = pyrit.pyr_world_stats(@ptrCast(S.world), out);
+}
+
+// --- Shaderpacks (docs/SHADERPACKS.md): Auswahl und Optionen kommen aus Java ---
+
+export fn pyd_pack_set(dir: [*:0]const u8, fallback_dir: [*:0]const u8, cache_dir: [*:0]const u8) void {
+    pyrit.pyr_pack_set(dir, fallback_dir, cache_dir);
+}
+
+export fn pyd_pack_option(index: u32, value: f32) void {
+    pyrit.pyr_pack_set_option(index, value);
+}
+
+/// rebuild != 0: Pack neu bauen und linken; sonst nur Optionswerte hochladen
+export fn pyd_pack_reload(rebuild: u32) i32 {
+    root.bind();
+    if (!S.ready) return 0;
+    if (!req(pyrit.pyr_pack_reload(@ptrCast(S.ctx), rebuild), "Shaderpack")) return -1;
+    // Himmel neu backen (Pack oder Optionen geändert)
+    const sun4 = [4]f32{ S.light.sun_direction[0], S.light.sun_direction[1], S.light.sun_direction[2], 2.6 };
+    var rgb: [3]f32 = undefined;
+    if (!req(pyrit.pyr_bake_sky(@ptrCast(S.ctx), 1024, 512, &sun4, &rgb), "Himmel backen")) return -1;
+    S.light.sun_color = rgb;
+    if (!req(pyrit.pyr_set_lighting(@ptrCast(S.ctx), &S.light), "Licht")) return -1;
+    return 0;
+}
+
+export fn pyd_pack_message(buf: [*]u8, cap: u32) u32 {
+    return pyrit.pyr_pack_message(buf, cap);
+}
+
+/// Letzter PYRIT_GPU_TIMING-Bericht (leer, wenn keiner vorliegt)
+export fn pyd_timing_report(buf: [*]u8, cap: u32) u32 {
+    if (pyrit.context.GpuTiming.text_len == 0 and S.timing_frame % 300 == 1) {
+        const m = std.fmt.bufPrint(&pyrit.context.GpuTiming.text, "diag env={any} frame={d}", .{ std.c.getenv("PYRIT_GPU_TIMING") != null, S.timing_frame }) catch "";
+        pyrit.context.GpuTiming.text_len = m.len;
+    }
+    const n: u32 = @intCast(@min(pyrit.context.GpuTiming.text_len, cap));
+    @memcpy(buf[0..n], pyrit.context.GpuTiming.text[0..n]);
+    pyrit.context.GpuTiming.text_len = 0;
+    return n;
 }

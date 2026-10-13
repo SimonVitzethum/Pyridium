@@ -13,6 +13,8 @@ pub const CUdeviceptr = u64;
 pub const CUcontext = ?*opaque {};
 pub const CUstream = ?*opaque {};
 pub const CUmodule = ?*opaque {};
+pub const CUlinkState = ?*opaque {};
+pub const CU_JIT_INPUT_PTX: c_int = 1;
 pub const CUfunction = ?*opaque {};
 pub const CUevent = ?*opaque {};
 pub const CUmemoryPool = ?*opaque {};
@@ -203,6 +205,13 @@ pub const Driver = struct {
     cuEventElapsedTime: *const fn (*f32, CUevent, CUevent) callconv(.c) CUresult,
     cuModuleLoadDataEx: *const fn (*CUmodule, ?*const anyopaque, c_uint, ?[*]const c_int, ?[*]?*anyopaque) callconv(.c) CUresult,
     cuModuleUnload: *const fn (CUmodule) callconv(.c) CUresult,
+    cuModuleGetGlobal_v2: *const fn (*CUdeviceptr, *usize, CUmodule, [*:0]const u8) callconv(.c) CUresult,
+    /// Shaderpack-Bau: PTX von Zig und NVRTC zu einem Modul linken
+    cuLinkCreate_v2: *const fn (c_uint, ?[*]const c_int, ?[*]?*anyopaque, *CUlinkState) callconv(.c) CUresult,
+    cuLinkAddData_v2: *const fn (CUlinkState, c_int, ?*anyopaque, usize, [*:0]const u8, c_uint, ?[*]const c_int, ?[*]?*anyopaque) callconv(.c) CUresult,
+    cuLinkComplete: *const fn (CUlinkState, *?*anyopaque, *usize) callconv(.c) CUresult,
+    cuLinkDestroy: *const fn (CUlinkState) callconv(.c) CUresult,
+    cuModuleLoadData: *const fn (*CUmodule, ?*const anyopaque) callconv(.c) CUresult,
     cuModuleGetFunction: *const fn (*CUfunction, CUmodule, [*:0]const u8) callconv(.c) CUresult,
     /// CUDA 12+: explicitly finish lazy loading before the first frame.
     cuFuncLoad: ?*const fn (CUfunction) callconv(.c) CUresult = null,

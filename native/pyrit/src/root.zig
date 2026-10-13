@@ -7,6 +7,7 @@ pub const types = @import("pyrit_device").types;
 pub const diag = @import("diag.zig");
 pub const dag_builder = @import("dag_builder.zig");
 pub const context = @import("context.zig");
+pub const pack = @import("pack.zig");
 pub const cuda = @import("cuda.zig");
 pub const xform = @import("xform.zig");
 pub const rt_prims = @import("rt_prims.zig");
@@ -131,6 +132,38 @@ pub export fn pyr_cuda_stream(ctx: ?*PyrContext) ?*anyopaque {
 pub export fn pyr_features(ctx: ?*PyrContext) u32 {
     const self = ctxOf(ctx) orelse return 0;
     return self.features();
+}
+
+/// Shaderpack wählen (vor pyr_create): Verzeichnis, Ausweichpack, Cache-Ordner
+pub export fn pyr_pack_set(dir: [*:0]const u8, fallback_dir: [*:0]const u8, cache_dir: [*:0]const u8) void {
+    pack.setPack(std.mem.span(dir), std.mem.span(fallback_dir), std.mem.span(cache_dir));
+}
+
+/// Himmel aus dem Shaderpack backen; sun = {Richtung xyz, Beleuchtungsstärke}.
+/// out_sun_color erhält die Sonnenfarbe am Boden.
+pub export fn pyr_bake_sky(ctx: ?*PyrContext, w: u32, h: u32, sun: *const [4]f32, out_sun_color: *[3]f32) Result {
+    return call(ctx, bakeSkyCall, .{ w, h, sun.*, out_sun_color });
+}
+
+fn bakeSkyCall(self: *Context, w: u32, h: u32, sun: [4]f32, out: *[3]f32) diag.Error!void {
+    out.* = try self.bakeSky(w, h, sun);
+}
+
+pub export fn pyr_pack_set_option(index: u32, value: f32) void {
+    pack.setOption(index, value);
+}
+
+/// Letzte Meldung des Pack-Baus (Fehler, Hinweis); Länge in Bytes
+pub export fn pyr_pack_message(buf: [*]u8, cap: u32) u32 {
+    const m = pack.message();
+    const n: u32 = @intCast(@min(m.len, cap));
+    @memcpy(buf[0..n], m[0..n]);
+    return n;
+}
+
+/// Pack neu bauen (Heißladen) oder Optionswerte neu hochladen
+pub export fn pyr_pack_reload(ctx: ?*PyrContext, rebuild: u32) Result {
+    return call(ctx, Context.reloadPack, .{rebuild != 0});
 }
 
 pub export fn pyr_synchronize(ctx: ?*PyrContext) Result {

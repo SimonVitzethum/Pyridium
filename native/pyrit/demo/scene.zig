@@ -207,8 +207,15 @@ pub const Sun = struct {
     radius: f32 = 0.0047,
 };
 
+/// Float-Parameter mit Umgebungsvariable als Überschreibung (Datenparameter)
+pub fn envFloat(name: [*:0]const u8, default: f32) f32 {
+    const e = std.c.getenv(name) orelse return default;
+    return std.fmt.parseFloat(f32, std.mem.span(e)) catch default;
+}
+
 /// Licht der Demo: Himmel mit Sonne als Umgebungskarte, zwei GI-Bounces, Nebel
 pub fn lighting(ctx: ?*anyopaque, gpa: std.mem.Allocator, sun: Sun) !types.Lighting {
+    _ = gpa;
     var l: types.Lighting = undefined;
     pyrit.pyr_lighting_default(&l);
     l.gi_distance = 96;
@@ -216,17 +223,20 @@ pub fn lighting(ctx: ?*anyopaque, gpa: std.mem.Allocator, sun: Sun) !types.Light
     // Dunst: dünn, mit der Höhe abnehmend, nach vorn streuend (Lichtschächte
     // zur Sonne). Er reicht bis zum Horizont und gibt fernen Bergen die
     // Luftperspektive; leicht bläulich wie echte Luft.
-    l.fog_density = 0.0011;
+    // Fast klar bis zum Horizont (Nutzerwunsch): sehr schwache Luftperspektive,
+    // per Datenparameter (PYRIT_FOG, Dichte je Blockeinheit) für Mods änderbar.
+    l.fog_density = envFloat("PYRIT_FOG", 0.00002);
     l.fog_height = 64;
     l.fog_falloff = 0.012;
     l.fog_color = .{ 0.82, 0.9, 1.0 };
     l.fog_anisotropy = 0.6;
     // Richtung zur Sonne, daraus Himmel und Sonnenfarbe (Einfachstreuung)
     l.sun_direction = .{ @sin(sun.theta) * @cos(sun.phi), @cos(sun.theta), @sin(sun.theta) * @sin(sun.phi) };
-    // 1024 x 512: gröber zeichnet die Karte die Wolkenränder als Treppen
-    const sk = try sky_mod.build(gpa, 1024, 512, l.sun_direction, 2.6);
-    defer gpa.free(sk.env);
-    req(pyrit.pyr_environment_set(@ptrCast(ctx), 1024, 512, &sk.env[0]));
+    // Himmel und Sonnenfarbe liefert das Shaderpack (Stages sky/sun), gebacken auf
+    // der GPU in eine 1024 x 512 Umgebungskarte. Keine Wolken, kein Dunst.
+    const sun4 = [4]f32{ l.sun_direction[0], l.sun_direction[1], l.sun_direction[2], 2.6 };
+    var sun_rgb: [3]f32 = undefined;
+    req(pyrit.pyr_bake_sky(@ptrCast(ctx), 1024, 512, &sun4, &sun_rgb));
     l.env_intensity = 1;
     // Die Sonne ist ein eigenes Licht, nicht Teil der Karte: so bekommt jeder
     // Punkt jeden Frame einen Schattenstrahl in die Sonnenscheibe, und nur der
@@ -235,15 +245,8 @@ pub fn lighting(ctx: ?*anyopaque, gpa: std.mem.Allocator, sun: Sun) !types.Light
     // besonnter Boden, und genau dieses Rauschen muss bei Bewegung die
     // zeitliche Mittelung wegschaffen.
     l.sun_angular_radius = sun.radius;
-    l.sun_color = sk.sun_color;
-    // Wolkenschatten: dieselbe Art Deckung wie die Wolken am Himmel, auf
-    // 1500 m Höhe, eine Kachel über 6 km
-    const cmap = try sky_mod.cloudShadowMap(gpa, 512);
-    defer gpa.free(cmap);
-    req(pyrit.pyr_texture_create(@ptrCast(ctx), 512, 512, cmap.ptr, &l.sun_shadow_texture));
-    l.sun_shadow_height = 1500;
-    l.sun_shadow_scale = cloud_shadow_scale;
-    l.sun_shadow_strength = 0.8;
+    l.sun_color = sun_rgb;
+    l.sun_shadow_texture = 0; // keine Wolken, keine Wolkenschatten
     if (std.c.getenv("PYRIT_DEBUG_MEDIUM") != null) l.flags |= types.lighting_debug_medium;
     if (std.c.getenv("PYRIT_DEBUG_FRONT") != null) l.flags |= types.lighting_debug_front;
     return l;
@@ -277,7 +280,7 @@ pub fn fx() api.PostFx {
     // Gras dann bei sRGB 96 und das Land wirkte trüb. Die neutrale Kurve
     // rollt die hellen Flächen weich ab, deshalb darf es knapp eine halbe
     // Blende heller sein.
-    f.exposure_compensation = 0.4;
+    f.exposure_compensation = envFloat("PYRIT_EXPOSURE_COMP", 0.0);
     return f;
 }
 

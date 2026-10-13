@@ -95,6 +95,12 @@ pub const Plan = struct {
     target: ?*std.ArrayList(Key) = null,
     /// offene Anfragen (auch aus früheren Frames); wird beim Abholen gefiltert
     requests: std.ArrayList(Key) = .empty,
+    /// Blickrichtung (Einheitsvektor; 0 = unbekannt) und halber Öffnungswinkel samt Reserve fürs
+    /// Drehen (Bogenmaß): Anfragen im Sichtkegel werden vor allen anderen gebaut
+    view_dir: [3]f64 = .{ 0, 0, 0 },
+    view_half: f64 = std.math.pi,
+    /// Chunks näher als dieser Abstand (Grundvoxel) zählen immer als sichtbar (Spiegelungen, GI, Drehen)
+    view_near: f64 = 256,
     frame: u64 = 0,
     /// Verdrängung ist teuer (ganze Tabelle) und eilt nicht
     evict_frame: u64 = 0,
@@ -134,6 +140,23 @@ pub const Plan = struct {
             d2 += v * v;
         }
         return @sqrt(d2);
+    }
+
+    /// 0: im Sichtkegel (oder nah), 1: dahinter. Die Kugel um den Chunk wird berücksichtigt.
+    fn viewClass(self: *const Plan, k: Key, cam: [3]f64) u8 {
+        if (self.view_half >= std.math.pi) return 0;
+        const s = self.chunkSize(k.lod);
+        const c = [3]f64{
+            (@as(f64, @floatFromInt(k.x)) + 0.5) * s - cam[0],
+            (@as(f64, @floatFromInt(k.y)) + 0.5) * s - cam[1],
+            (@as(f64, @floatFromInt(k.z)) + 0.5) * s - cam[2],
+        };
+        const d = @sqrt(c[0] * c[0] + c[1] * c[1] + c[2] * c[2]);
+        const r = s * 0.8660254; // halbe Raumdiagonale
+        if (d <= r + self.view_near) return 0;
+        const cos_a = (c[0] * self.view_dir[0] + c[1] * self.view_dir[1] + c[2] * self.view_dir[2]) / d;
+        const slack = std.math.asin(@min(1.0, r / d));
+        return if (std.math.acos(std.math.clamp(cos_a, -1.0, 1.0)) <= self.view_half + slack) 0 else 1;
     }
 
     fn inRange(self: *const Plan, k: Key) bool {
@@ -254,6 +277,9 @@ pub const Plan = struct {
             plan: *const Plan,
             cam: [3]f64,
             fn less(c: @This(), a: Key, b: Key) bool {
+                const ca = c.plan.viewClass(a, c.cam);
+                const cb = c.plan.viewClass(b, c.cam);
+                if (ca != cb) return ca < cb;
                 const da = c.plan.distance(a, c.cam) / @as(f64, @floatFromInt(@as(u64, 1) << @intCast(a.lod)));
                 const db = c.plan.distance(b, c.cam) / @as(f64, @floatFromInt(@as(u64, 1) << @intCast(b.lod)));
                 if (da != db) return da < db;

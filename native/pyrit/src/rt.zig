@@ -59,6 +59,7 @@ pub const Rt = struct {
     sbt_raygen: [2]cuda.CUdeviceptr = .{ 0, 0 },
     /// Strahlplätze der Wiederholungs-Wavefront (je Streifen)
     replay: ReplayBuffers = .{},
+    replay_epoch: u32 = 0,
     sbt_miss: cuda.CUdeviceptr = 0,
     sbt_hit: cuda.CUdeviceptr = 0,
     hit_header: [optix.sbt_record_header_size]u8 align(16) = undefined,
@@ -520,8 +521,8 @@ pub const Rt = struct {
     /// fertig sind, überspringt der Schattierungskern.
     /// Gemessen: das Bild braucht 4 Durchgänge (fast alle Strahlen im
     /// ersten), die indirekte Beleuchtung 6.
-    pub const replay_passes: u32 = 8;
-    pub const replay_passes_gi: u32 = 7;
+    pub const replay_passes: u32 = 5;
+    pub const replay_passes_gi: u32 = 4;
     /// Einträge der Strahlliste je Pixel. Gemessen fragt der erste Durchgang
     /// 5 je Pixel an; was nicht passt, kommt im nächsten Durchgang dran.
     // Durchgang 1 fragt im Mittel 6,3 Strahlen je Pixel an (gemessen); was
@@ -564,6 +565,12 @@ pub const Rt = struct {
         var y0: u32 = 0;
         while (y0 < h) : (y0 += rows) {
             const rb = &self.replay;
+            // neue Epoche statt Zustandsfelder zu löschen (types.ReplayParams.epoch)
+            self.replay_epoch +%= 1;
+            if (self.replay_epoch == 0 or self.replay_epoch >= 1 << 29) {
+                try c.check(c.drv.cuMemsetD8Async(rb.state, 0, @as(u64, rb.pixels) * types.replay_slots * 4, c.stream), "cuMemsetD8Async");
+                self.replay_epoch = 1;
+            }
             var rp = types.ReplayParams{
                 .rays = rb.rays,
                 .hits = rb.hits,
@@ -576,13 +583,13 @@ pub const Rt = struct {
                 .rows = @min(rows, h - y0),
                 .gi = @intFromBool(gi),
                 .speculate = 1,
+                .epoch = self.replay_epoch,
             };
             const n_px = w * rp.rows;
-            try c.check(c.drv.cuMemsetD8Async(rb.state, 0, @as(u64, n_px) * types.replay_slots * 4, c.stream), "cuMemsetD8Async");
             try c.check(c.drv.cuMemsetD8Async(rb.done, 0, @as(u64, n_px) * 4, c.stream), "cuMemsetD8Async");
             c.mark("Replay leeren");
             params.replay = rp;
-            const passes = if (gi) replay_passes_gi else replay_passes;
+            const passes = @min(@max(if (std.c.getenv(if (gi) "PYRIT_REPLAY_PASSES_GI" else "PYRIT_REPLAY_PASSES")) |e| (std.fmt.parseInt(u32, std.mem.span(e), 10) catch replay_passes) else if (gi) replay_passes_gi else replay_passes, 2), 16);
             var pass: u32 = 0;
             while (pass < passes) : (pass += 1) {
                 try c.check(c.drv.cuMemsetD8Async(rb.count, 0, 12, c.stream), "cuMemsetD8Async");
@@ -624,15 +631,18 @@ pub const Rt = struct {
             }
         }
         if (stats) {
-            std.debug.print("{s}: {d} Pixel, Strahlen je Pixel und Durchgang:", .{ if (gi) "GI" else "Bild", w * h });
-            for (per_pass[0..if (gi) replay_passes_gi else replay_passes]) |n| std.debug.print(" {d:.2}", .{@as(f64, @floatFromInt(n)) / @as(f64, @floatFromInt(w * h))});
-            std.debug.print("\n   davon neu angefragt (Platz hatte Antwort):", .{});
-            for (re_req[0..if (gi) replay_passes_gi else replay_passes]) |n| std.debug.print(" {d:.2}", .{@as(f64, @floatFromInt(n)) / @as(f64, @floatFromInt(w * h))});
-            std.debug.print("\n   neu angefragt je Platz (Summe):", .{});
-            for (by_slot) |n| std.debug.print(" {d:.2}", .{@as(f64, @floatFromInt(n)) / @as(f64, @floatFromInt(w * h))});
-            std.debug.print("\n   über replay_slots:", .{});
-            for (over[0..if (gi) replay_passes_gi else replay_passes]) |n| std.debug.print(" {d:.2}", .{@as(f64, @floatFromInt(n)) / @as(f64, @floatFromInt(w * h))});
-            std.debug.print("\n", .{});
+            // Bericht über den Textpuffer (Java loggt ihn), stderr geht im Gradle-Lauf verloren
+            const T = @import("context.zig").GpuTiming;
+            if (!gi) T.stats_len = 0;
+            var wr = std.Io.Writer.fixed(T.stats[T.stats_len..]);
+            const np = if (gi) replay_passes_gi else replay_passes;
+            wr.print("{s} Strahlen/Pixel je Durchgang:", .{if (gi) "GI" else "Bild"}) catch {};
+            for (per_pass[0..np]) |n| wr.print(" {d:.2}", .{@as(f64, @floatFromInt(n)) / @as(f64, @floatFromInt((w * h)))}) catch {};
+            wr.writeAll(" | neu angefragt:") catch {};
+            for (re_req[0..np]) |n| wr.print(" {d:.2}", .{@as(f64, @floatFromInt(n)) / @as(f64, @floatFromInt((w * h)))}) catch {};
+            wr.writeAll(" | je Platz:") catch {};
+            for (by_slot) |n| wr.print(" {d:.2}", .{@as(f64, @floatFromInt(n)) / @as(f64, @floatFromInt((w * h)))}) catch {};
+            T.stats_len += wr.buffered().len;
         }
     }
 
@@ -674,6 +684,8 @@ const ReplayBuffers = struct {
         self.rays = try c.devAlloc(places * @sizeOf(types.ReplayRay), "Wavefront-Strahlen");
         self.hits = try c.devAlloc(places * @sizeOf(types.ReplayHit), "Wavefront-Treffer");
         self.state = try c.devAlloc(places * 4, "Wavefront-Zustand");
+        // frisch angelegt: Epoche 0 = leer (die Host-Epochen beginnen bei 1)
+        try c.check(c.drv.cuMemsetD8Async(self.state, 0, places * 4, c.stream), "cuMemsetD8Async");
         self.done = try c.devAlloc(@as(u64, pixels) * 4, "Wavefront-Pixel");
         // Liste: je Pixel höchstens replay_list_per_pixel Anfragen je Durchgang
         self.list = try c.devAlloc(@as(u64, pixels) * Rt.replay_list_per_pixel * 4, "Wavefront-Liste");

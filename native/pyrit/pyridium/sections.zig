@@ -37,6 +37,11 @@ pub const Store = struct {
     nstates: u32 = 0,
     // geladene Spalten (Chunk x/z) – Chunks darin sind vollständig bekannt
     columns: std.AutoHashMapUnmanaged(u64, void) = .empty,
+    // Simulationsbereich (Chunk-Mitte, Radius in Chunks; -1 = aus): dort liefert der Server die echten Chunks, der Fernbereich
+    // wird dort nie berechnet
+    sim_cx: i32 = 0,
+    sim_cz: i32 = 0,
+    sim_r: i32 = -1,
     // ungültig gewordene Blockbereiche, bis zum nächsten flush
     dirty: std.ArrayList([6]i64) = .empty,
     y_min: i32 = -64,
@@ -245,7 +250,23 @@ pub fn flush(ctx: ?*anyopaque, world: ?*anyopaque, spectator_world: ?*anyopaque)
     S.dirty.clearRetainingCapacity();
 }
 
-/// Generator-Thread: welche Chunks des Auftrags liegen ganz in geladenen Spalten?
+/// Simulationsbereich setzen: Chunks, die ganz darin oder in geladenen Spalten liegen, rechnet der Fernbereich nicht
+pub fn setSimArea(cx: i32, cz: i32, r: i32) void {
+    lock();
+    defer unlock();
+    S.sim_cx = cx;
+    S.sim_cz = cz;
+    S.sim_r = r;
+}
+
+fn inSim(cx: i32, cz: i32) bool {
+    if (S.sim_r < 0) return false;
+    const dx = @as(i64, cx) - S.sim_cx;
+    const dz = @as(i64, cz) - S.sim_cz;
+    return @abs(dx) <= S.sim_r and @abs(dz) <= S.sim_r;
+}
+
+/// Generator-Thread: welche Chunks des Auftrags liegen ganz in geladenen Spalten oder im Simulationsbereich?
 pub fn known(keys: []const pyrit.types.ChunkKey, out: []u32) t.SecTable {
     lock();
     defer unlock();
@@ -266,7 +287,7 @@ pub fn known(keys: []const pyrit.types.ChunkKey, out: []u32) t.SecTable {
         outer: while (cz <= cz1) : (cz += 1) {
             var cx = cx0;
             while (cx <= cx1) : (cx += 1) {
-                if (!S.columns.contains(colKey(cx, cz))) {
+                if (!S.columns.contains(colKey(cx, cz)) and !inSim(cx, cz)) {
                     all = false;
                     break :outer;
                 }

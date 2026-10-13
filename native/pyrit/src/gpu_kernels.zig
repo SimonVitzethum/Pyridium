@@ -100,6 +100,34 @@ export fn pyr_k_temporal(p: types.PostParams) callconv(kernel) void {
     pyr.post.temporal(&p, c[0], c[1]);
 }
 
+// --- Shaderpack-Himmel (Stages "sky" und "sun", docs/SHADERPACKS.md) ---
+extern fn pyr_pack_sky(dx: f32, dy: f32, dz: f32, sun: *const [4]f32, out: *[3]f32) void;
+extern fn pyr_pack_sun(sun: *const [4]f32, out: *[3]f32) void;
+
+/// Umgebungskarte (equirektangulär, phi = atan2(z, x), theta = acos(y)) aus dem Pack backen
+export fn pyr_k_bake_sky(p: types.BakeSkyParams) callconv(kernel) void {
+    const i = @workGroupId(0) * 256 + @workItemId(0);
+    if (i >= p.width * p.height) return;
+    const x = i % p.width;
+    const y = i / p.width;
+    const pi: f32 = 3.14159265;
+    const theta = (@as(f32, @floatFromInt(y)) + 0.5) / @as(f32, @floatFromInt(p.height)) * pi;
+    const phi = (@as(f32, @floatFromInt(x)) + 0.5) / @as(f32, @floatFromInt(p.width)) * 2 * pi;
+    var c: [3]f32 = .{ 0, 0, 0 };
+    const sun = p.sun;
+    const fm = pyr.fmath;
+    pyr_pack_sky(fm.sin(theta) * fm.cos(phi), fm.cos(theta), fm.sin(theta) * fm.sin(phi), &sun, &c);
+    @as([*][4]f32, @ptrFromInt(p.out))[i] = .{ c[0], c[1], c[2], 0 };
+}
+
+export fn pyr_k_bake_sun(p: types.BakeSkyParams) callconv(kernel) void {
+    if (@workItemId(0) != 0 or @workGroupId(0) != 0) return;
+    var c: [3]f32 = .{ 0, 0, 0 };
+    const sun = p.sun;
+    pyr_pack_sun(&sun, &c);
+    @as([*][4]f32, @ptrFromInt(p.out))[p.width * p.height] = .{ c[0], c[1], c[2], 0 };
+}
+
 export fn pyr_k_atrous(p: types.PostParams) callconv(kernel) void {
     const c = postCoords(&p) orelse return;
     pyr.post.atrous(&p, c[0], c[1]);

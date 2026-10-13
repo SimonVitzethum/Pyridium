@@ -18,6 +18,21 @@
 
 const warp = @import("warp.zig");
 const types = @import("types.zig");
+const builtin = @import("builtin");
+
+/// Stage "display" des Shaderpacks (docs/SHADERPACKS.md): auf der GPU zur
+/// Link-Zeit aus dem Pack aufgelöst, auf der CPU (Tests) der eingebaute Tonemap.
+const pack_gpu = builtin.cpu.arch == .nvptx64;
+extern fn pyr_pack_display(r: f32, g: f32, b: f32, out: *[3]f32, mode: u32) void;
+
+inline fn displayColor(c: [3]f32, mode: u32) [3]f32 {
+    if (comptime pack_gpu) {
+        var out: [3]f32 = undefined;
+        pyr_pack_display(c[0], c[1], c[2], &out, mode);
+        return out;
+    }
+    return post.tonemap(c, mode);
+}
 const fm = @import("fmath.zig");
 const post = @import("post.zig");
 
@@ -276,7 +291,21 @@ pub fn exposeScan(p: *const types.PostFxParams, i: u64) void {
     const acc: [*]u32 = @ptrFromInt(p.expose_acc);
     warp.add(&acc[0], @intFromFloat(v * expose_scale));
     warp.add(&acc[1], 1);
+    // Histogramm (ab acc[4]) der Helligkeit nur über Oberflächen, nicht den
+    // Himmel: schützt helle Flächen (Schnee, Sand) vor dem Ausbrennen, ohne
+    // dass helle Wolken das Land abdunkeln.
+    if (col[3] >= 0.5) {
+        const bin: u32 = @min(@as(u32, @intFromFloat(v * expose_bins_per_stop)), expose_bins - 1);
+        _ = @atomicRmw(u32, &acc[expose_hist_base + bin], .Add, 1, .monotonic);
+    }
 }
+
+const expose_bins: u32 = 256;
+const expose_bins_per_stop: f32 = 8;
+const expose_hist_base: u32 = 4;
+/// Dieses Perzentil heller Oberflächen darf nicht über `expose_white` liegen
+const expose_percentile: f32 = 0.97;
+const expose_white: f32 = 1.1;
 
 /// Aus dem Mittelwert die Belichtung bilden und zeitlich gedämpft nachführen.
 /// Ein Thread genügt; das Ergebnis bleibt auf der GPU, damit die Kette nicht
@@ -290,7 +319,28 @@ pub fn exposeApply(p: *const types.PostFxParams, i: u64) void {
     if (n > 0) {
         const mean = @as(f32, @floatFromInt(acc[0])) / (expose_scale * @as(f32, @floatFromInt(n))) - expose_offset;
         // Mittleres Grau auf 0.18 legen, dann Korrektur des Anwenders
-        const want = 0.18 / @max(fm.exp2(mean), 1e-6);
+        var want = 0.18 / @max(fm.exp2(mean), 1e-6);
+        // Hochlichtschutz: Perzentil der Oberflächenhelligkeit
+        var total: u32 = 0;
+        for (0..expose_bins) |b| total += acc[expose_hist_base + b];
+        if (total > 256) {
+            const need: f32 = @as(f32, @floatFromInt(total)) * expose_percentile;
+            var run: f32 = 0;
+            var bin: u32 = 0;
+            var frac: f32 = 0;
+            while (bin < expose_bins) : (bin += 1) {
+                const c: f32 = @floatFromInt(acc[expose_hist_base + bin]);
+                if (run + c >= need) {
+                    // innerhalb der Klasse linear interpolieren: sonst springt die
+                    // Belichtung stufenweise (0,125 Blenden) und das Bild flimmert
+                    frac = if (c > 0) (need - run) / c else 0;
+                    break;
+                }
+                run += c;
+            }
+            const l_hi = fm.exp2((@as(f32, @floatFromInt(bin)) + frac) / expose_bins_per_stop - expose_offset);
+            want = @min(want, expose_white / @max(l_hi, 1e-6));
+        }
         target = @min(@max(want, p.expose_min), p.expose_max) * fm.exp2(p.expose_compensation);
     }
     const prev = state[1];
@@ -305,6 +355,7 @@ pub fn exposeApply(p: *const types.PostFxParams, i: u64) void {
     state[1] = cur;
     acc[0] = 0;
     acc[1] = 0;
+    for (0..expose_bins) |b| acc[expose_hist_base + b] = 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -443,7 +494,7 @@ pub fn resolveFx(p: *const types.PostFxParams, i: u64) void {
     if (p.grade != 0) col = gradeLinear(p, col);
 
     var disp: [3]f32 = undefined;
-    const tm = post.tonemap(.{ @max(col[0], 0), @max(col[1], 0), @max(col[2], 0) }, p.tonemap);
+    const tm = displayColor(.{ @max(col[0], 0), @max(col[1], 0), @max(col[2], 0) }, p.tonemap);
     inline for (0..3) |k| disp[k] = post.linearToSrgb(tm[k]);
     disp = applyLut(p, disp);
 

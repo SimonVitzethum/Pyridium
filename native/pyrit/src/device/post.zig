@@ -132,6 +132,7 @@ pub fn temporal(p: *const types.PostParams, x: u32, y: u32) void {
 
     var hist: V4 = .{ 0, 0, 0, 0 };
     var hmom: [2]f32 = .{ 0, 0 };
+    var halb: V4 = .{ 0, 0, 0, 0 };
     // Anteil des Verlaufs, der von einer *anderen* Voxelfläche stammt
     var edge_w: f32 = 0;
     if (!reset) {
@@ -190,6 +191,10 @@ pub fn temporal(p: *const types.PostParams, x: u32, y: u32) void {
                     }
                     const bwv = bw * vw;
                     inline for (0..4) |q| hist[q] += c[q] * bwv;
+                    if (p.hist_albedo != 0) {
+                        const ha = ldh(p.hist_albedo, j);
+                        inline for (0..3) |q| halb[q] += ha[q] * bwv;
+                    }
                     if (p.hist_moments != 0) {
                         const m = ld2(p.hist_moments, j);
                         hmom[0] += m[0] * bwv;
@@ -205,6 +210,7 @@ pub fn temporal(p: *const types.PostParams, x: u32, y: u32) void {
             inline for (0..4) |q| hist[q] /= wsum;
             hmom[0] /= wsum;
             hmom[1] /= wsum;
+            inline for (0..3) |q| halb[q] /= wsum;
             // Nur wenn sich wirklich etwas bewegt: bei stehendem Bild trifft
             // die Reprojektion die Pixelmitte, dann ist bilinear exakt.
             const moving = @abs(fx - @round(fx)) > 0.01 or @abs(fy - @round(fy)) > 0.01;
@@ -326,6 +332,22 @@ pub fn temporal(p: *const types.PostParams, x: u32, y: u32) void {
         out[3] = count;
     }
     sth(p.out_color, i, out);
+
+    // Albedo mitführen: statisch voll mitteln (Texelkanten werden geglättet),
+    // bei Bewegung dem aktuellen Frame folgen (jedes Nachschlagen würde sonst
+    // die Textur verwischen).
+    if (p.out_albedo != 0) {
+        const ca = ld4(p.albedo, i);
+        var oa: V4 = .{ ca[0], ca[1], ca[2], 1 };
+        if (!reset) {
+            const mvv = @as([*]const [2]f32, @ptrFromInt(p.motion))[i];
+            const sp = @sqrt(mvv[0] * mvv[0] + mvv[1] * mvv[1]);
+            const follow = 0.6 * @min(@max((sp - 0.02) / 0.4, 0), 1);
+            const a = @max(1.0 / @max(out[3], 1), follow);
+            inline for (0..3) |k| oa[k] = halb[k] + (ca[k] - halb[k]) * a;
+        }
+        sth(p.out_albedo, i, oa);
+    }
 
     // Momente der Helligkeit mitführen; ihre Varianz steuert den À-trous-Filter.
     if (want_moments) {
@@ -480,7 +502,7 @@ pub fn resolve(p: *const types.PostParams, x: u32, y: u32) void {
     const i = @as(u64, y) * p.width + x;
     const irr = ldh(p.src, i);
     const color = ld4(p.color, i);
-    const alb = ld4(p.albedo, i);
+    const alb = if (p.out_albedo != 0) ldh(p.out_albedo, i) else ld4(p.albedo, i);
     var hdr: V4 = .{ irr[0], irr[1], irr[2], color[3] };
     if (color[3] >= 0.5) {
         inline for (0..3) |k| hdr[k] *= @max(alb[k], 0.01);

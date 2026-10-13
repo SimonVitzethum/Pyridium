@@ -642,6 +642,19 @@ pub const World = struct {
             else
                 0.5 * h / @max(c.scale[1], 1e-6);
         }
+        // Blickkegel für die Reihenfolge der Anfragen (sichtbar und bald sichtbar zuerst)
+        if (cam) |c| {
+            if (c.projection != types.projection_orthographic) {
+                const f = [3]f64{ -c.view_to_world[2], -c.view_to_world[6], -c.view_to_world[10] };
+                const l = @sqrt(f[0] * f[0] + f[1] * f[1] + f[2] * f[2]);
+                if (l > 1e-6) {
+                    self.plan.view_dir = .{ f[0] / l, f[1] / l, f[2] / l };
+                    const half_diag = std.math.atan(@sqrt(@as(f64, c.scale[0]) * c.scale[0] + @as(f64, c.scale[1]) * c.scale[1]));
+                    // Reserve: schnelles Drehen und Spiegelungen/GI neben dem Bild
+                    self.plan.view_half = @min(half_diag + 0.8, std.math.pi);
+                }
+            }
+        }
         // Budget: gleitend gröber werden, wenn Speicher oder Plätze knapp werden
         var pressure: f64 = 0;
         if (self.memory_budget > 0 and self.stats.bytes > 0)

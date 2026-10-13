@@ -25,9 +25,36 @@ const pi: f32 = std.math.pi;
 
 pub const Rng = struct {
     state: u32,
+    /// Pixelabhängiger Startwert und Frame der geschichteten Dimensionen
+    /// (Kronecker-Folge über die Zeit, Cranley-Patterson-Verschiebung je Pixel).
+    /// Die ersten `strat_dims` Ziehungen eines Pixels (Sonnenkegel, Himmel,
+    /// erster GI-Strahl ...) konvergieren so über die Frames wie 1/N statt
+    /// 1/sqrt(N); danach läuft der gewöhnliche Hash. Ohne `stratified` (Forks,
+    /// Tests) verhält sich alles wie bisher.
+    seed: u32 = 0,
+    frame: u32 = 0,
+    dim: u32 = strat_dims,
+
+    pub const strat_dims: u32 = 8;
+    /// frac(sqrt(p)) · 2^32 für die ersten Primzahlen: gleichverteilte, paarweise
+    /// unabhängige Schrittweiten der Kronecker-Folge
+    const kron = [strat_dims]u32{ 0x6A09E667, 0xBB67AE85, 0x3C6EF372, 0xA54FF53A, 0x510E527F, 0x9B05688C, 0x1F83D9AB, 0x5BE0CD19 };
 
     pub fn init(x: u32, y: u32, frame: u32, salt: u32) Rng {
         return .{ .state = hash(x *% 1973 +% hash(y *% 9277 +% hash(frame *% 26699 +% salt))) };
+    }
+
+    /// Wie init, mit geschichteten ersten Dimensionen
+    pub fn initStratified(x: u32, y: u32, frame: u32, salt: u32, plain: bool) Rng {
+        if (plain) return init(x, y, frame, salt);
+        // Zustand und Verschiebung hängen nicht vom Frame ab, nur Pixel und Salz
+        const seed = hash(x *% 1973 +% hash(y *% 9277 +% hash(salt +% 0x51ED)));
+        return .{
+            .state = hash(x *% 1973 +% hash(y *% 9277 +% hash(frame *% 26699 +% salt))),
+            .seed = seed,
+            .frame = frame,
+            .dim = 0,
+        };
     }
 
     pub fn hash(v: u32) u32 {
@@ -37,6 +64,13 @@ pub const Rng = struct {
     }
 
     pub fn next(self: *Rng) f32 {
+        if (self.dim < strat_dims) {
+            const k = self.dim;
+            self.dim += 1;
+            const off = hash(self.seed +% k *% 0x9E3779B9);
+            const u = off +% self.frame *% kron[k];
+            return @as(f32, @floatFromInt(u >> 8)) * (1.0 / 16777216.0);
+        }
         self.state = hash(self.state);
         return @as(f32, @floatFromInt(self.state >> 8)) * (1.0 / 16777216.0);
     }
@@ -81,7 +115,41 @@ pub const Surface = struct {
     /// Dielectric F0 from LabPBR (legacy materials keep 4%).
     f0: Vec3 = .{ 0.04, 0.04, 0.04 },
     ao: f32 = 1,
+    /// LabPBR 1.3 vordefinierte Leiter (Werte 230..237): F0 aus n/k. Negativ =
+    /// nicht gesetzt, dann zählt für Metalle die Albedo als F0 (Wert 255).
+    metal_f0: Vec3 = .{ -1, -1, -1 },
 };
+
+/// LabPBR 1.3: die acht vordefinierten Metalle (Grün-Wert 230..237), n und k
+/// je Kanal R, G, B. F0 am Normaleinfall: ((n-1)² + k²) / ((n+1)² + k²).
+const conductor_n = [8][3]f32{
+    .{ 2.9114, 2.9497, 2.5845 }, // Eisen
+    .{ 0.18299, 0.42108, 1.3734 }, // Gold
+    .{ 1.3456, 0.96521, 0.61722 }, // Aluminium
+    .{ 3.1071, 3.1812, 2.3230 }, // Chrom
+    .{ 0.27105, 0.67693, 1.3164 }, // Kupfer
+    .{ 1.9100, 1.8300, 1.4400 }, // Blei
+    .{ 2.3757, 2.0847, 1.8453 }, // Platin
+    .{ 0.15943, 0.14512, 0.13547 }, // Silber
+};
+const conductor_k = [8][3]f32{
+    .{ 3.0893, 2.9318, 2.7670 },
+    .{ 3.4242, 2.3459, 1.7704 },
+    .{ 7.4746, 6.3995, 5.3031 },
+    .{ 3.3314, 3.3291, 3.1350 },
+    .{ 3.6092, 2.6248, 2.2921 },
+    .{ 3.5100, 3.4000, 3.1800 },
+    .{ 4.2655, 3.7153, 3.1365 },
+    .{ 3.9291, 3.1900, 2.3808 },
+};
+
+pub fn conductorF0(index: u32) Vec3 {
+    const n = conductor_n[index];
+    const k = conductor_k[index];
+    var r: Vec3 = undefined;
+    inline for (0..3) |c| r[c] = ((n[c] - 1) * (n[c] - 1) + k[c] * k[c]) / ((n[c] + 1) * (n[c] + 1) + k[c] * k[c]);
+    return r;
+}
 
 pub fn surface(s: *const types.Scene, attribute: u32) Surface {
     const mats: [*]const types.Material = @ptrFromInt(s.materials);
@@ -329,9 +397,20 @@ fn blockSurface(s: *const types.Scene, m: *const types.Material, attribute: u32,
         // The GGX implementation squares perceptual roughness internally:
         // alpha = (1 - LabPBR perceptual smoothness)^2.
         sf.roughness = @max(1 - sp[0], 0.02);
-        sf.metallic = if (sp[1] * 255 >= 229.5) 1 else 0;
+        const gv = sp[1] * 255;
+        sf.metallic = if (gv >= 229.5) 1 else 0;
         sf.f0 = splat(sp[1]);
+        // 230..237: vordefiniertes Metall (n/k-Tabelle), 238..255: Albedo als F0
+        if (gv >= 229.5 and gv < 237.5) sf.metal_f0 = conductorF0(@intFromFloat(gv - 229.5));
         sf.subsurface = if (sp[2] * 255 > 64.5) @max((sp[2] * 255 - 65) / 190, 0) else 0;
+        // LabPBR-Porosität (Blau 0..64): Nässe dunkelt poröse Flächen ab und glättet sie
+        const wet = if (s.lighting != 0) @as(*const types.Lighting, @ptrFromInt(s.lighting)).wetness else 0;
+        if (wet > 0) {
+            const por = if (sp[2] * 255 <= 64.5) sp[2] * 255 / 64 else 0;
+            const dark = 1 + 0.8 * wet * por;
+            sf.albedo = .{ fm.pow(@max(sf.albedo[0], 1e-4), dark), fm.pow(@max(sf.albedo[1], 1e-4), dark), fm.pow(@max(sf.albedo[2], 1e-4), dark) };
+            sf.roughness = sf.roughness + (0.05 - sf.roughness) * 0.7 * wet;
+        }
         sf.emission += sf.albedo * splat(sp[3] * (255.0 / 254.0) * 4);
     }
     if (m.normal_texture != 0) {
@@ -348,7 +427,8 @@ fn blockSurface(s: *const types.Scene, m: *const types.Material, attribute: u32,
 }
 
 fn surfaceF0(sf: *const Surface) Vec3 {
-    return sf.f0 + (sf.albedo - sf.f0) * splat(sf.metallic);
+    const metal = if (sf.metal_f0[0] >= 0) sf.metal_f0 else sf.albedo;
+    return sf.f0 + (metal - sf.f0) * splat(sf.metallic);
 }
 
 // ---------------------------------------------------------------------------

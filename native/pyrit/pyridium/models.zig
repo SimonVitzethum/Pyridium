@@ -76,6 +76,24 @@ export fn pyd_model_create(faces: [*]const t.ModelFace, face_count: u32, count: 
     return @intFromPtr(geometry);
 }
 
+/// Strukturvorlagen: Voxelliste [x, y, z, attribut] (Host-Speicher, Attribut = BlockPalette-Attribut wie im LOD-Terrain) -> geteilte
+/// HashDAG-Geometrie. Dieselbe Geometrie dient beliebig vielen Instanzen (pyd_models_frame).
+export fn pyd_model_create_voxels(voxels: [*]const [4]u32, count: u32, log2_size: u32) u64 {
+    root.bind();
+    const ctx = world.context() orelse return 0;
+    if (count == 0 or count > 1 << 22 or log2_size < 3 or log2_size > 9) return 0;
+    const n: u32 = @as(u32, 1) << @intCast(log2_size);
+    for (voxels[0..count]) |v| {
+        if (v[0] >= n or v[1] >= n or v[2] >= n) return 0;
+    }
+    var geometry: pyrit.api.Handle = null;
+    if (pyrit.pyr_geometry_build(@ptrCast(ctx), log2_size, @ptrCast(voxels), count, 1, &geometry) != 0) {
+        root.setError("Struktur-DAG: {s}", .{pyrit.pyr_error_message()});
+        return 0;
+    }
+    return @intFromPtr(geometry);
+}
+
 export fn pyd_models_frame(models: [*]const t.ModelInstance, count: u32) i32 {
     root.bind();
     const ctx = world.context() orelse return -1;

@@ -78,7 +78,8 @@ pub const Tracer = struct {
         };
         const rays: [*]types.ReplayRay = @ptrFromInt(self.rp.rays);
         const state: [*]u32 = @ptrFromInt(self.rp.state);
-        if (state[k] == 2 and same(rays[k], want)) {
+        const stamp = self.rp.epoch << 2;
+        if (state[k] == stamp | 2 and same(rays[k], want)) {
             const h = @as([*]const types.ReplayHit, @ptrFromInt(self.rp.hits))[k];
             if (h.instance == types.no_hit) return null;
             const inst = &tr.instances(s)[h.instance];
@@ -92,7 +93,7 @@ pub const Tracer = struct {
             };
         }
         // neu oder anders als beim letzten Mal: anfragen
-        if (state[k] == 2 and self.rp.flags & types.replay_diagnostics != 0) {
+        if (state[k] == stamp | 2 and self.rp.flags & types.replay_diagnostics != 0) {
             _ = @atomicRmw(u32, @as(*u32, @ptrFromInt(self.rp.count + 4)), .Add, 1, .monotonic);
             _ = @atomicRmw(u32, @as(*u32, @ptrFromInt(self.rp.count + 16 + 4 * @as(u64, i))), .Add, 1, .monotonic);
         }
@@ -106,7 +107,7 @@ fn request(rp: *const types.ReplayParams, k: u64, want: types.ReplayRay) void {
     const rays: [*]types.ReplayRay = @ptrFromInt(rp.rays);
     const state: [*]u32 = @ptrFromInt(rp.state);
     rays[k] = want;
-    state[k] = 1;
+    state[k] = (rp.epoch << 2) | 1;
     const counter: *u32 = @ptrFromInt(rp.count);
     const slot = warp.increment(counter);
     if (slot < rp.capacity) {

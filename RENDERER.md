@@ -388,3 +388,60 @@ meldete 34.686 sichtbar / 43.904 resident / 0 offen; die Full-HD-Aufnahme
 zeigt wieder beleuchtete Entities und Szenenreflexionen. Quellspielstand,
 Spieleroptionen und echte Renderer-Konfiguration wurden nicht geändert.
 `./gradlew build -x compileCuda` lieferte die aktualisierte Mod-JAR erfolgreich.
+
+## Profiling und Datenparameter (Optimierungsrunde 05.10.2026)
+
+- `PYRIT_GPU_TIMING=1` (optional `PYRIT_GPU_TIMING_PASSES=1`, `PYRIT_REPLAY_STATS=1`)
+  schreibt den 60-Frame-Mittelbericht jetzt auch als `PyritWorld`-Zeile in
+  `logs/latest.log` (`pyd_timing_report`); stderr ging im Gradle-Lauf verloren.
+  Wegen der Mitbenutzung der GPU die **kleinste** Gesamtzeit über mehrere
+  Berichte vergleichen, nicht den letzten.
+- Replay-Zustandsfelder werden nicht mehr je Streifen gelöscht, sondern mit einer
+  Epoche gestempelt (`ReplayParams.epoch`): „Replay leeren“ 0,55 -> 0,08 ms.
+- Dunst ist nur noch sehr schwach (`fog_density` 0,00002, Umgebungsvariable
+  `PYRIT_FOG`), die Belichtungskorrektur liegt bei -0,2 EV (`PYRIT_EXPOSURE_COMP`);
+  beides sind Datenparameter in `native/pyrit/demo/scene.zig`.
+- Gemessen (RR aus, 1080p, Testszene, kleinste Gesamtzeit, GPU mitbenutzt):
+  Basis ca. 12,2 ms, mit Epoche ca. 12-13 ms (Rauschen der geteilten GPU größer als
+  der Gewinn); typischer Wert unter Last 28 ms. Verdichtung offener Pixel
+  (Compaction der späten Replay-Durchgänge) brachte keinen Gewinn und wurde verworfen.
+
+### Runde 2 (05.10.2026): Belichtung, Zufallsfolgen, Nativmodus, LabPBR-Teile
+
+- **Belichtung:** die Automatik (`postfx.zig`) misst zusätzlich ein Histogramm der
+  Oberflächenhelligkeit (ohne Himmel) und begrenzt die Belichtung so, dass das
+  97.-Perzentil nicht über 1,1 liegt (Schnee/Sand brennen nicht mehr aus, helle
+  Wolken dunkeln das Land nicht ab). Belichtungskorrektur Standard 0 EV
+  (`PYRIT_EXPOSURE_COMP`), Dunst `PYRIT_FOG`.
+- **Geschichtete Zufallsdimensionen:** die ersten 8 Ziehungen je Pixel (Sonnenkegel,
+  Himmel, erster GI-Strahl) sind Kronecker-Folgen über die Frames mit pixelweiser
+  Verschiebung (`Rng.initStratified`); `PYRIT_PLAIN_RNG=1` schaltet auf den alten Hash.
+  Im statischen Test kein messbarer Unterschied (Restrauschen vom Entrauscher dominiert);
+  kein Rückschritt.
+- **Nativmodus (ohne DLSS-RR) ist jetzt Standard:** Jitter bleibt an, der zeitliche Verlauf
+  des Entrauschers mittelt die Subpixel, kein TAAU-Durchgang. Sichtbar schärfer.
+  `PYRIT_NATIVE_NOJITTER=1` schaltet den Jitter ab.
+- **Wavefront:** 5 statt 8 Bild- und 4 statt 7 GI-Durchgänge (gemessen 1,1 ms gespart;
+  `PYRIT_REPLAY_PASSES[_GI]` zum Vergleichen).
+- **LabPBR 1.3:** die acht vordefinierten Leiter (Grün 230-237) nutzen F0 aus der n/k-Tabelle,
+  255 die Albedo (`conductorF0`). Porosität/Nässe: `Lighting.wetness` (0..1, Standard 0,
+  kostet dann nichts) dunkelt poröse Flächen ab und glättet. **Noch offen:** Height/POM
+  (braucht den Blickstrahl in `surfaceAt`), Regenquelle für `wetness` aus Java.
+- **Herkunft der Optik:** Die gewünschte Optik orientiert sich allgemein an Complementary
+  Reimagined/Unbound (EminGT / Complementary Development). Deren Lizenz (Complementary
+  License Agreement 1.7) behandelt alles außerhalb der Grants als „All Rights Reserved";
+  Code oder Konstanten daraus wurden **nicht** übernommen (nur die Lizenzdatei gelesen).
+  Belichtung, Kurven und Beleuchtung sind eigene, pfadverfolgte Umsetzungen.
+- **Shaderpack-Laufzeit** (siehe docs/SHADERPACKS.md): die Anzeigestufe (Tonemap, Lebendigkeit)
+  kommt aus dem Standardpack, per NVRTC gebaut und mit den Kernels gelinkt.
+  Albedo-Verlauf ist jetzt Standard (`PYRIT_POST_NOALBEDO=1` schaltet ab): bei festem Bild
+  sank das Flackern von 0,0123 auf 0,0009 (Burst-Metrik, gleiche Pose), die Gradient-Schaerfe
+  von 0,0337 auf 0,0307 (Texelkanten werden ueber den Jitter geglaettet).
+- **Credits:** Die Optik und der Entrauscher orientieren sich an Techniken des Shaderpacks
+  Noble (BelmuTM, GPL-3.0-or-later, https://github.com/BelmuTM/Noble); Code wird nicht
+  kopiert, Assets nur mit Namensnennung.
+- **Credits Arc-Shader:** Null-MC/Arc-Shader (MIT-Lizenz, geprueft im Klon) dient als
+  Ideenquelle fuer das Realismus-Pack `arc-realism` (filmische Kurve, physikalisch
+  orientierter Himmel). Eigener CUDA-Code, keine Uebernahme von GLSL.
+- Test-Hilfen: `-Dpyridium.camYawRate`, `-Dpyridium.camSpeed` (wandernde Testkamera),
+  `PYRIDIUM_TEST_MODE`, `PYRIDIUM_TEST_SHOT_EVERY` in `tools/check_renderer.sh`.
