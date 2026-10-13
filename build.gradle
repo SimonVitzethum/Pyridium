@@ -53,15 +53,38 @@ tasks.register("buildNative", Exec) {
 	if (dlssSdk != null) cmd.add("-Ddlss-sdk=" + dlssSdk)
 	commandLine cmd
 }
+// Fett-Jar: die jeweils andere OS-Lib per Cross-Compile dazu (Zig braucht dafür
+// kein SDK, alles CUDA-seitige ist dynamisch). Ein Jar läuft auf beiden OS.
+def crossIsWindows = !isWindows
+def crossLib = crossIsWindows ? "pyridium.dll" : "libpyridium.so"
+def crossDir = crossIsWindows ? "windows-x86_64" : "linux-x86_64"
+def crossOut = file("$buildDir/native-cross")
+tasks.register("buildNativeCross", Exec) {
+	inputs.property("dlssSdk", dlssSdk ?: "disabled")
+	inputs.property("os", crossIsWindows ? "windows" : "linux")
+	inputs.files(fileTree(nativeSrc) { exclude '.zig-cache/**', 'zig-out/**' }).withPropertyName("src").skipWhenEmpty(false)
+	outputs.file(crossIsWindows ? "$crossOut/bin/$crossLib" : "$crossOut/$crossLib")
+	workingDir nativeSrc
+	def cmd = ["zig", "build", "pyridium", "--release=fast", "--prefix", crossOut.absolutePath, "--prefix-lib-dir", crossOut.absolutePath,
+		"-Dtarget=" + (crossIsWindows ? "x86_64-windows-gnu" : "x86_64-linux-gnu")]
+	if (dlssSdk != null) cmd.add("-Ddlss-sdk=" + dlssSdk)
+	commandLine cmd
+}
 processResources {
     inputs.property("version", project.version)
     filesMatching("fabric.mod.json") { expand(version: project.version) }
-	dependsOn("buildNative")
+	dependsOn("buildNative", "buildNativeCross")
 	from(nativeOut) {
 		include "**/" + nativeLib
 		eachFile { it.path = nativeLib }
 		includeEmptyDirs = false
 		into nativesDir
+	}
+	from(crossOut) {
+		include "**/" + crossLib
+		eachFile { it.path = crossLib }
+		includeEmptyDirs = false
+		into "natives/" + crossDir
 	}
 }
 tasks.named("runClient") {

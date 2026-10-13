@@ -46,6 +46,7 @@ Windows x86_64 is supported alongside Linux: same sources, same commands.
 
 - Needs: Zig on `PATH`, NVIDIA GPU + driver (CUDA/OptiX), JDK 25, CUDA Toolkit with `nvcc` (`PATH` or `CUDA_PATH`, else auto-detected under `C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA`; without `nvcc` the Vanilla fallback applies). No MSVC needed — the build targets MinGW (`-Dtarget=x86_64-windows-gnu`, same C ABI).
 - The build picks `pyridium.dll` and `natives/windows-x86_64` automatically; the loader unpacks the right library per OS.
+- One fat jar runs on both: each build compiles its host library plus cross-compiles the other (`x86_64-windows-gnu` / `x86_64-linux-gnu`, no SDK needed — all CUDA linkage is dynamic), so the jar carries both `natives/` trees.
 - Headed output goes through the SDL window surface (software blit, no VSync yet). If that fails (e.g. exotic window), the renderer keeps running headless-style with screenshots instead of crashing.
 - Limits, stated honestly: the Windows DLL is cross-compile-verified (links as PE32+), but no Windows runtime/GPU test was run from here. The `tools/*.sh` test harnesses are bash-only (use WSL/Git-Bash for those). DLSS on Windows is untested.
 
