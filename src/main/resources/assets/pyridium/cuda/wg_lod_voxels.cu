@@ -8,10 +8,12 @@
 // Dichte und Biom sind an den Stuetzpunkten bitgleich zu Vanilla; Oberflaechenmaterial, Wasser
 // und Baeume sind Naeherungen je Biom.
 
+#include "wg_lod_ore.cuh"
 typedef unsigned int uint;
-#define INT_MIN (-2147483647 - 1)
 
 __device__ void* vf_b[24];
+#define STRUCT_EXTERNAL_VFB
+#include "wg_struct_adapt.cuh"
 
 #define gScratch ((const float*)vf_b[0])  // 3D-Dichte je Auftrag
 #define gLp ((const int*)vf_b[1])         // Kopf, siehe LP_*
@@ -23,6 +25,11 @@ __device__ void* vf_b[24];
 #define gNode ((const int*)vf_b[7])       // R-Baum-Knoten, Wort 30 = Biom-Index
 #define gSlots ((const int2*)vf_b[8])     // je Auftrag: Blockminimum x/z
 #define gSlotY ((const int*)vf_b[9])      // je Auftrag: y des untersten Stuetzpunkts
+#define gTable ((const int*)vf_b[12])     // Zustand -> Attribut (wie wg_lod_surface): [n, nBiome, (id, attr, tint)...]
+#define gOreTab ((const int*)vf_b[13])    // Erze: [count, nWords, 10 Ints je Eintrag, Biommasken]
+#define gLut ((const uint*)vf_b[11])      // wg_lod_surface: je Auftrag und Spalte 4 Materialien (0xFFFFFFFF = keins)
+#define gStruct ((const StructTables*)vf_b[14])   // GPU-Strukturen (StructureGpu.viewBuffer), aktiv mit LP_LUT-Bit 3
+#define gPre ((const float*)vf_b[15])     // je Spalte 9 x 9 vorlaeufige Oberflaechenhoehen (Bodenschaetzung der Strukturen)
 
 #define LP_SCRATCH 0
 #define LP_DENSITY 1
@@ -39,6 +46,8 @@ __device__ void* vf_b[24];
 #define LP_DEEPSLATE 12
 #define LP_BEDROCK 13
 #define LP_SEED 14
+#define LP_LUT 18                        // Bit 0: Materialtabelle aus wg_lod_surface, Bit 1: Schluchten/Hoehlen, Bit 2: Erze
+#define LP_SEED_HI 19
 
 #define BIOME_WORDS 8
 // je Biom: 0 Oberseite, 1 Fuellung, 2 unter Wasser, 3 Laub, 4 Baumdichte (float-Bits, je Block^2), 5 Stamm
@@ -61,8 +70,8 @@ struct LodPush { int jobCount; int pad[7]; };
 extern "C" __global__ void __launch_bounds__(128) wg_lod_voxels(LodPush p) {
 	int job = blockIdx.y;
 	if (job >= p.jobCount) return;
+	if (gSlotY[job] == INT_MIN) return;   // vom GPU-Band abgewaehlt (wg_lod_select)
 	int t = blockIdx.x * blockDim.x + threadIdx.x;
-	if (t >= 32 * 32) return;
 	int4 j = gJobs[job];
 	int col = j.x, keyY = j.y, out = j.z;
 	int vx = t & 31, vz = t >> 5;
@@ -70,15 +79,95 @@ extern "C" __global__ void __launch_bounds__(128) wg_lod_voxels(LodPush p) {
 	int cap = gLp[LP_CAPACITY];
 	const float* d = gScratch + (unsigned long long)job * gLp[LP_SCRATCH] + gLp[LP_DENSITY];
 	int y0 = gSlotY[job];
+	const uint* lut = gLp[LP_LUT] ? gLut + ((unsigned long long)job * 1024 + t) * 4 : nullptr;
+	int2 org = gSlots[job];
+	int flags = gLp[LP_LUT];
+	bool carve = (flags & 2) != 0, ore = (flags & 4) != 0, structs = (flags & LPF_STRUCT) != 0;
+	const float* pre = gPre + (unsigned long long)col * 81;
+	wc_u64 seed64 = ((wc_u64)(uint)gLp[LP_SEED_HI] << 32) | (wc_u64)(uint)gLp[LP_SEED];
+	// Solidheit je Stuetzspalte als Bitmaske ueber y (sy <= 64): 6 Zeilen x 34 Spalten dieses Blocks.
+	// Die Nachbarabfragen unten sind dann Bit-Operationen im Shared Memory statt je 7 Loads je Voxel.
+	__shared__ unsigned long long colMask[6 * SIDE];
+	__shared__ int origTop[6 * SIDE];          // oberster fester Stuetzpunkt vor dem Aushoehlen
+	__shared__ unsigned long long stMask[6 * SIDE], fdMask[6 * SIDE];   // Strukturbloecke und Fundament (in colMask enthalten)
+	__shared__ WcCap caps[96];
+	__shared__ int nCaps;
+	__shared__ OreParams orep;
+	CarveParams cp = carveDefaults(seed64, minY, minY + height - 1, sea, -54);
+	int vzBase = blockIdx.x * 4;
+	if (carve) {
+		if (threadIdx.x == 0) {
+			nCaps = carveGather(cp, org.x - s, y0, org.y + (vzBase - 1) * s, org.x + 33 * s, y0 + (sy - 1) * s, org.y + (vzBase + 4) * s, caps, 96);
+		}
+	}
+	if (ore) {
+		int n = gOreTab[0];
+		if (threadIdx.x == 0) { orep.seed = seed64; orep.count = n; }
+		for (int e = threadIdx.x; e < n; e += blockDim.x) {
+			const int* q = gOreTab + 2 + e * 10;
+			orep.e[e] = oreEntry(q[0], q[1], q[2], __int_as_float(q[3]), __int_as_float(q[4]), q[5], __int_as_float(q[6]), q[7], q[8], q[9]);
+		}
+	}
+	__syncthreads();
+	for (int i = threadIdx.x; i < 6 * SIDE; i += blockDim.x) {
+		int lx = i % SIDE, lz = vzBase + i / SIDE;
+		const float* c = d + (lx + lz * SIDE) * sy;
+		unsigned long long m = 0;
+		for (int yi = 0; yi < sy; yi++) m |= (unsigned long long)(c[yi] > 0.0f) << yi;
+		int top = m ? 63 - __clzll((long long)m) : -1;
+		origTop[i] = top;
+		if (carve && top >= 0 && top < sy - 1) {
+			// Schluchten (Spaltenboden) und Hoehlenwuermer (Kapseln); Dach: mindestens 3 Bloecke unter der Oberflaeche
+			int wxl = org.x + (lx - 1) * s, wzl = org.y + (lz - 1) * s;
+			int gB = y0 + (top + 1) * s - 1;
+			int fl = carveFloor(cp, wxl, wzl, gB);
+			if (fl != WC_NO_CARVE) {
+				int fi = (fl - y0 + s - 1) / s;
+				if (fi < 0) fi = 0;
+				if (fi < sy) m &= (1ull << fi) - 1ull;
+			}
+			if (nCaps > 0) {
+				for (int yi = 0; yi <= top; yi++) {
+					if (((m >> yi) & 1ull) == 0) continue;
+					int wy = y0 + yi * s;
+					if (wy <= gB - 3 && carveCapsHit(caps, nCaps, wxl, wy, wzl)) m &= ~(1ull << yi);
+				}
+			}
+		}
+		unsigned long long stm = 0, fdm = 0;
+		if (structs) {
+			// Strukturen: Bloecke setzen/raeumen, Fundament bis zum echten Boden (struct_adaptMask), danach zaehlen sie als fest
+			int wxl = org.x + (lx - 1) * s, wzl = org.y + (lz - 1) * s;
+			int G = (int)floorf(struct_preHeight(pre, (float)(lx - 1) + 0.5f, (float)(lz - 1) + 0.5f));
+			struct_adaptMask(*gStruct, wxl, wzl, s, G, y0, sy, minY, minY + height, m, stm, fdm);
+		}
+		stMask[i] = stm;
+		fdMask[i] = fdm;
+		colMask[i] = m;
+	}
+	__syncthreads();
 	int xi = vx + 1, zi = vz + 1;
 	int q = (xi >> 1) + (zi >> 1) * 17;   // Biom je 2 x 2 Stuetzspalten (ExactLodPipeline.BIOME_SIDE)
 	int leaf = gTmp[((unsigned long long)col * gLp[LP_QUARTS] + q) * TMP_WORDS];
 	int bi = leaf >= 0 ? gNode[leaf * 31 + 30] : -1;
 	if (bi < 0 || bi >= gLp[LP_BIOMES]) bi = 0;
 	const int* B = gBiome + bi * BIOME_WORDS;
-	int2 org = gSlots[job];
 	int wx = org.x + vx * s, wz = org.y + vz * s;
 	float treeDensity = __int_as_float(B[4]);
+	StructCol scOwn;
+	scOwn.n = 0;
+	uint fAttr = 0;
+	if (structs) {
+		int G0 = (int)floorf(struct_preHeight(pre, (float)vx + 0.5f, (float)vz + 0.5f));
+		struct_columnBegin(*gStruct, scOwn, wx, wz, s, G0);
+		if (scOwn.n) {
+			treeDensity = 0.0f;
+			int yl, fs;
+			if (fdMask[(zi - vzBase) * SIDE + xi] && struct_columnLow(*gStruct, scOwn, yl, fs)) fAttr = struct_attr(*gStruct, STRUCT_PRESENT | (uint)fs);
+			if (fAttr == 0) fAttr = (uint)gLp[LP_STONE];
+		}
+	}
+	const unsigned long long ownSt = stMask[(zi - vzBase) * SIDE + xi], ownFd = fdMask[(zi - vzBase) * SIDE + xi];
 	uint seed = (uint)gLp[LP_SEED];
 	int yChunk0 = keyY * 32 * s;
 	auto solidAt = [&](int x, int yb, int z) -> bool {
@@ -87,7 +176,7 @@ extern "C" __global__ void __launch_bounds__(128) wg_lod_voxels(LodPush p) {
 		int yi = (yb - y0) / s;
 		if (yi < 0) return true;        // unter dem Bereich: verdeckter Fels
 		if (yi >= sy) return false;     // darueber: Luft
-		return d[yi + (x + z * SIDE) * sy] > 0.0f;
+		return (colMask[(z - vzBase) * SIDE + x] >> yi) & 1ull;
 	};
 	auto waterAt = [&](int x, int yb, int z) -> bool {
 		return yb < sea && yb >= minY && !solidAt(x, yb, z);
@@ -95,11 +184,10 @@ extern "C" __global__ void __launch_bounds__(128) wg_lod_voxels(LodPush p) {
 	// Oberflaeche der Spalte im Dichtebereich (erste Luft ueber Fels, von oben)
 	int ground = INT_MIN;
 	{
-		const float* c = d + (xi + zi * SIDE) * sy;
-		if (!(c[sy - 1] > 0.0f)) {
-			for (int yi = sy - 2; yi >= 0; yi--) {
-				if (c[yi] > 0.0f) { ground = y0 + (yi + 1) * s; break; }
-			}
+		unsigned long long m = colMask[(zi - vzBase) * SIDE + xi];
+		if (!((m >> (sy - 1)) & 1ull)) {
+			unsigned long long below = m & ((1ull << (sy - 1)) - 1ull);
+			if (below) ground = y0 + (64 - __clzll((long long)below)) * s;
 		}
 	}
 	// Baeume: gejittertes Raster in Blockkoordinaten, unabhaengig von der Stufe (kein Springen beim LOD-Wechsel)
@@ -150,14 +238,30 @@ extern "C" __global__ void __launch_bounds__(128) wg_lod_voxels(LodPush p) {
 			if (!exposed) {
 				// Keep the whole warp at the output ballot below. Hidden cells
 				// contribute no voxel, but still participate in compaction.
+			} else if (scOwn.n && ((ownSt >> ((yb - y0) / s)) & 1ull)) {
+				attr = struct_attr(*gStruct, struct_columnAt(*gStruct, scOwn, yb));
+			} else if (ownFd && ((ownFd >> ((yb - y0) / s)) & 1ull)) {
+				attr = fAttr;
 			} else if (yb < minY + s) {
 				attr = (uint)gLp[LP_BEDROCK];
 			} else if (!above) {
 				attr = (uint)(yb + s < sea ? B[2] : B[0]);
+				if (lut && lut[0] != 0xFFFFFFFFu) attr = lut[0];
+				// ausgehoehlter Boden (Schlucht, Hoehle): Gestein statt Oberflaechenmaterial
+				if (carve && (yb - y0) / s < origTop[(zi - vzBase) * SIDE + xi]) {
+					attr = (uint)(yb < 0 ? gLp[LP_DEEPSLATE] : ((lut && lut[3] != 0xFFFFFFFFu) ? lut[3] : (uint)gLp[LP_STONE]));
+				}
 			} else {
 				int depth = 1;
 				while (depth * s < 4 && solidAt(xi, yb + (depth + 1) * s, zi)) depth++;
 				attr = (uint)(depth * s < 4 ? B[1] : (yb < 0 ? gLp[LP_DEEPSLATE] : gLp[LP_STONE]));
+				if (lut) {
+					// k = Voxel fester Masse ueber diesem (bis 3): 0 waere die Oberflaeche
+					int k = 1;
+					while (k < 3 && solidAt(xi, yb + (k + 1) * s, zi)) k++;
+					uint m = lut[k];
+					if (m != 0xFFFFFFFFu && !(k == 3 && yb < 0)) attr = m;
+				}
 			}
 		} else if (waterAt(xi, yb, zi)) {
 			if (!waterAt(xi, yb + s, zi) && !solidAt(xi, yb + s, zi)) attr = (uint)gLp[LP_WATER];
@@ -165,6 +269,15 @@ extern "C" __global__ void __launch_bounds__(128) wg_lod_voxels(LodPush p) {
 			// Krone (Naeherung, an Chunkgrenzen ohne Nachbarwissen): Stamm und runde Krone
 			if (yb + s > crownLo && yb < crownHi) attr = (uint)B[3];
 			else if (trunkHere && s == 1 && yb >= ground && yb < trunkTop) attr = (uint)B[5];
+		}
+		if (ore && s <= 2 && attr != 0 && (attr == (uint)gLp[LP_STONE] || attr == (uint)gLp[LP_DEEPSLATE])) {
+			int oid = oreAtBiome(orep, gOreTab + 2 + gOreTab[0] * 10, gOreTab[1], bi, wx, yb, wz, yb < 0 ? 1 : 0);
+			if (oid >= 0) {
+				int nS = gTable[0];
+				for (int k = 0; k < nS; k++) {
+					if (gTable[2 + k * 3] == oid) { attr = (uint)gTable[3 + k * 3]; break; }
+				}
+			}
 		}
 		// Reserve one contiguous range per warp, rather than contending on
 		// the same chunk counter for every exposed voxel. Counts still include

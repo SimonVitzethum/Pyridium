@@ -20,6 +20,13 @@ public abstract class ChunkGeneratorMixin {
     private void pyridium$gpuBiomes(RandomState randomState, Blender blender, StructureManager structureManager, ChunkAccess protoChunk,
                                       CallbackInfoReturnable<CompletableFuture<ChunkAccess>> cir) {
         if (!((Object) this instanceof NoiseBasedChunkGenerator gen)) return;
+        if (!simon.pyridium.worldgen.full.FullChunkService.inFallback()) {
+            CompletableFuture<ChunkAccess> full = simon.pyridium.worldgen.full.FullChunkService.tryGenerate(gen, randomState, blender, structureManager, protoChunk);
+            if (full != null) {
+                cir.setReturnValue(full);
+                return;
+            }
+        }
         CompletableFuture<ChunkAccess> f = GpuTerrain.tryCreateBiomes(gen, randomState, blender, structureManager, protoChunk);
         if (f != null) cir.setReturnValue(f);
     }

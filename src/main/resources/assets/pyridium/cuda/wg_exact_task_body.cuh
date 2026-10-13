@@ -1280,6 +1280,7 @@ __device__ void main_()
     int idx = int(vf_gid.x);
     int chunk = int(vf_gid.y);
     if (idx >= n || chunk >= gP.chunkCount) return;
+    if (gP.pad1 == 1 && gChunkY[chunk] == (-2147483647 - 1)) return;  // 3D-Auftrag vom GPU-Band abgewaehlt
     int chunkBase = chunk * gP.scratchFloats;
     int sx = T(start, 3), sy = T(start, 4);
     int iy = idx % sy;

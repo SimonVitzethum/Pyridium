@@ -36,6 +36,11 @@ public interface GpuCompute extends AutoCloseable {
     /** Nur auf dem Geraet, genullt. */
     long[] deviceBuffer(long size);
 
+    /** Freier Grafikspeicher in Bytes; Long.MAX_VALUE, wenn unbekannt. */
+    default long freeMemory() {
+        return Long.MAX_VALUE;
+    }
+
     /** Ziel fuer Kopien vom Geraet, auf dem Host lesbar. */
     long[] readbackBuffer(long size);
 

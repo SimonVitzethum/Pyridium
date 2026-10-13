@@ -23,6 +23,7 @@ __device__ void main_()
     int entry = int(vf_gid.x);
     int chunk = int(vf_gid.y);
     if (entry >= gP.coordEntries || chunk >= gP.chunkCount) return;
+    if (gP.pad1 == 1 && gChunkY[chunk] == (-2147483647 - 1)) return;  // vom GPU-Band abgewaehlt
     // Segment suchen (sortiert nach entryOffset)
     int lo = 0, hi = gP.segCount - 1;
     while (lo < hi)

@@ -27,7 +27,7 @@ import net.minecraft.world.level.levelgen.material.rule.OreVeinRule;
  * einen Stapel. Biome kommen als Fenster (6 x 6 Quarts x Hoehe, x/z -1..4) vom Aufrufer, wie
  * Vanillas BiomeManager sie aus der Region liest. Nicht threadsicher (ein GPU-Thread).
  */
-public final class ExactTerrainPipeline implements AutoCloseable {
+public final class ExactTerrainPipeline implements simon.pyridium.worldgen.full.TerrainSource {
     /** Binaerdateien aus dem Mod-Jar: PTX (build/cuda, Gradle-Task compileCuda) unter assets/pyridium/shaders/ptx. */
     public static final GpuCompute.BinarySource JAR = name -> {
         try (InputStream in = ExactTerrainPipeline.class.getResourceAsStream("/assets/pyridium/shaders/ptx/" + name)) {
@@ -224,6 +224,18 @@ public final class ExactTerrainPipeline implements AutoCloseable {
      * {@link #state} die Zustands-IDs (Bit 31: Post-Processing aus doFill, Bit 30: aus MaterialSystem).
      */
     public void run(int n, int[] chunkXZ) {
+        List<GpuCompute.Dispatch> list = prepare(n, chunkXZ);
+        long bytes = (long) n * 256 * height * 4;
+        lastList = list;
+        lastMs = vk.run(list, List.<long[]>of(new long[]{bState[0], bReadback[0], bytes}));
+    }
+
+    /**
+     * Pyridium (Vollchunk-Pfad): schreibt die Host-Eingaben fuer n Chunks und liefert die Dispatches, ohne zu
+     * rechnen. Das Fenster-Puffer-Binding {@link #windowBuffer()} kann auch vom Geraet befuellt werden
+     * (dann vor diesen Dispatches); das Ergebnis liegt danach in {@link #stateBuffer()}.
+     */
+    public List<GpuCompute.Dispatch> prepare(int n, int[] chunkXZ) {
         if (n <= 0 || n > capacity) throw new IllegalArgumentException("Stapel " + n + " / " + capacity);
         ints(bChunk[1], n * 2).put(0, chunkXZ, 0, n * 2);
         ExactAquifer.SurfTable st = ExactAquifer.surfaceTable(chunkXZ, n);
@@ -248,9 +260,38 @@ public final class ExactTerrainPipeline implements AutoCloseable {
             p[0] = pass;
             list.add(new GpuCompute.Dispatch(sfPipe, p, 4, n));
         }
-        long bytes = (long) n * 256 * height * 4;
         lastList = list;
-        lastMs = vk.run(list, List.<long[]>of(new long[]{bState[0], bReadback[0], bytes}));
+        return list;
+    }
+
+    @Override
+    public int minY() {
+        return minY;
+    }
+
+    @Override
+    public int height() {
+        return height;
+    }
+
+    @Override
+    public int qh() {
+        return qh;
+    }
+
+    /** Geraetepuffer mit den Zustands-IDs aller Chunks des Stapels (Index (c * height + yi) * 256 + z + x * 16). */
+    public long[] stateBuffer() {
+        return bState;
+    }
+
+    /** Chunk-Minima (x, z je Chunk, host-beschreibbar, von {@link #prepare} befuellt). */
+    public long[] chunkBuffer() {
+        return bChunk;
+    }
+
+    /** Biomfenster (host-beschreibbar, wird je Lauf hochgeladen; das Geraet darf es danach ueberschreiben). */
+    public long[] windowBuffer() {
+        return bWin;
     }
 
     private List<GpuCompute.Dispatch> lastList = List.of();

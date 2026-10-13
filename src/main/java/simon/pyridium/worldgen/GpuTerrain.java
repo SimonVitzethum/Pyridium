@@ -102,6 +102,7 @@ public final class GpuTerrain {
     private final Map<RandomState, Gen> gens = new IdentityHashMap<>();
     private final AtomicLong gpuChunks = new AtomicLong(), fallbackChunks = new AtomicLong(), verifyBad = new AtomicLong(),
             structureChunks = new AtomicLong(), biomeChunks = new AtomicLong(), writeNs = new AtomicLong(), carverNs = new AtomicLong();
+    private int profiles;
     private double biomeMsTotal;
     private double gpuMsTotal;
     private long lastStats = System.nanoTime();
@@ -148,6 +149,12 @@ public final class GpuTerrain {
      */
     public static void setClientShare(double share) {
         clientShare = Math.clamp(share, 0.0, 1.0);
+    }
+
+    /** Pyridium: current GPU share (1.0 without a running instance), used by the full-chunk service. */
+    public static double currentShare() {
+        GpuTerrain t = instance;
+        return t == null ? 1.0 : t.share();
     }
 
     private double share() {
@@ -589,6 +596,10 @@ public final class GpuTerrain {
         if (ok.isEmpty()) return;
         pipe.run(ok.size(), chunkXZ);
         gpuMsTotal += pipe.lastMs;
+        if (Boolean.getBoolean("pyridium.gpuProfile") && ok.size() >= 16 && profiles++ < 3) {
+            LOG.info("Profil Stapel {} Chunks ({} ms Wand):", ok.size(), String.format("%.2f", pipe.lastMs));
+            for (String l : pipe.profileLast()) LOG.info("  {}", l);
+        }
         gpuChunks.addAndGet(ok.size());
         for (int c = 0; c < ok.size(); c++) {
             Request r = ok.get(c);

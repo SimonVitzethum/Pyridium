@@ -35,6 +35,8 @@ public final class WorldgenBench {
                 run(server, level, r, 1250, 1250, ChunkStatus.TERRAIN, () ->
                 run(server, level, r, -1250, 1250, ChunkStatus.FULL, () -> {
                     if (jfr) LOG.info("genBench JFR: {}", net.minecraft.util.profiling.jfr.JvmProfiler.INSTANCE.stop());
+                    String dump = System.getProperty("pyridium.fullDump");
+                    if (dump != null) server.submit(() -> simon.pyridium.worldgen.full.FullDump.dump(level, -1250 / 1, 1250 / 1, Math.min(r, 12), java.nio.file.Path.of(dump))).join();
                     if (Boolean.getBoolean("pyridium.genBenchExit")) server.halt(false);
                 }))));
     }
@@ -67,6 +69,21 @@ public final class WorldgenBench {
             LOG.info("genBench {}: {} Chunks in {} s = {} Chunks/s, CPU {} Kerne im Mittel (GPU-Terrain {})", status, n, String.format("%.2f", s),
                     String.format("%.1f", n / s), String.format("%.1f", cores),
                     Boolean.parseBoolean(System.getProperty("pyridium.gpuWorldgen", "true")) ? "an" : "aus");
+            // release the tickets so the chunks unload again (flat RAM; unedited GPU chunks are not saved)
+            if (!Boolean.getBoolean("pyridium.genBenchKeep"))
+                server.submit(() -> {
+                    try {
+                        var f = net.minecraft.server.level.ServerChunkCache.class.getDeclaredField("ticketStorage");
+                        f.setAccessible(true);
+                        var storage = (net.minecraft.world.level.TicketStorage) f.get(level.getChunkSource());
+                        for (var pos : positions)
+                            storage.removeTicket(new net.minecraft.server.level.Ticket(net.minecraft.server.level.TicketType.FORCED, ticketLevel), pos);
+                    } catch (ReflectiveOperationException re) {
+                        LOG.warn("Tickets nicht freigebbar: {}", re.toString());
+                    }
+                }).join();
+            Runtime rt = Runtime.getRuntime();
+            LOG.info("genBench Heap: {} MiB belegt von {} MiB", (rt.totalMemory() - rt.freeMemory()) >> 20, rt.maxMemory() >> 20);
             then.run();
         }));
     }

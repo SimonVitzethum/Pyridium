@@ -33,12 +33,17 @@ public final class ExactBiomePipeline implements AutoCloseable {
     }
 
     public static Model model(RandomState rs, NoiseGeneratorSettings settings, BiomeSource source, int minY, int height) {
+        return model(rs, settings, source, minY, height, 1);
+    }
+
+    /** ys > 1: vertical subsampling (one biome sample per ys quarts, Pyridium fast path; the consumer replicates). */
+    public static Model model(RandomState rs, NoiseGeneratorSettings settings, BiomeSource source, int minY, int height, int ys) {
         var router = settings.noiseRouter();
         List<DensitySampler> roots = new ArrayList<>();
         List<ExactPlan.Vol> vols = new ArrayList<>();
         for (var f : List.of(router.temperature(), router.vegetation(), router.continents(), router.erosion(), router.depth(), router.ridges())) {
             roots.add(rs.getSampler(f));
-            vols.add(ExactPlan.quartVol(minY, height));
+            vols.add(ys == 1 ? ExactPlan.quartVol(minY, height) : new ExactPlan.Vol(4, (height >> 2) / ys, 4, 0, minY, 0, 4, 4 * ys, 4, 0));
         }
         ExactPlan plan = ExactPlan.forRoots(roots, vols, false);
         ExactBiomes eb = new ExactBiomes(source);
@@ -51,11 +56,20 @@ public final class ExactBiomePipeline implements AutoCloseable {
 
     public ExactBiomePipeline(GpuCompute vk, Model m, int minY, int height, int capacity, GpuCompute.BinarySource spv, boolean codegen)
             throws Exception {
+        this(vk, m, minY, height, capacity, spv, codegen, 1);
+    }
+
+    /** Vertical subsampling factor (1 = every quart); {@link #qh} is the number of samples per column. */
+    public final int ys;
+
+    public ExactBiomePipeline(GpuCompute vk, Model m, int minY, int height, int capacity, GpuCompute.BinarySource spv, boolean codegen, int ys)
+            throws Exception {
+        this.ys = ys;
         if (!m.unsupported().isEmpty()) throw new IllegalArgumentException("nicht unterstuetzt: " + m.unsupported());
         this.vk = vk;
         this.minY = minY;
         this.height = height;
-        this.qh = height >> 2;
+        this.qh = (height >> 2) / ys;
         this.quarts = 16 * qh;
         this.capacity = capacity;
         this.plan = m.plan();
@@ -102,6 +116,12 @@ public final class ExactBiomePipeline implements AutoCloseable {
 
     /** Rechnet n Chunks (Blockminima x/z in chunkXZ); danach {@link #biome}. */
     public void run(int n, int[] chunkXZ) {
+        List<GpuCompute.Dispatch> list = prepare(n, chunkXZ);
+        lastMs = vk.run(list, List.<long[]>of(new long[]{bOut[0], bReadback[0], (long) n * quarts * 4}));
+    }
+
+    /** Pyridium (Vollchunk-Pfad): Dispatches ohne Ausfuehrung; Ergebnis danach in {@link #outBuffer()} (Geraet). */
+    public List<GpuCompute.Dispatch> prepare(int n, int[] chunkXZ) {
         if (n <= 0 || n > capacity) throw new IllegalArgumentException("Stapel " + n + " / " + capacity);
         ExactTerrainPipeline.ints(bChunk[1], n * 2).put(0, chunkXZ, 0, n * 2);
         List<GpuCompute.Dispatch> list = new ArrayList<>();
@@ -112,7 +132,12 @@ public final class ExactBiomePipeline implements AutoCloseable {
         p1[0] = 1;
         list.add(new GpuCompute.Dispatch(biomePipe, push.clone(), (quarts + 63) / 64, n));
         list.add(new GpuCompute.Dispatch(biomePipe, p1, 1, n));
-        lastMs = vk.run(list, List.<long[]>of(new long[]{bOut[0], bReadback[0], (long) n * quarts * 4}));
+        return list;
+    }
+
+    /** Geraetepuffer: Biom-Index je Quart, Chunk c ab c * quarts, Index qy + (qx + qz * 4) * qh. */
+    public long[] outBuffer() {
+        return bOut;
     }
 
     /** Biom-Indizes von Chunk c (quarts Werte, Index qy + (qx + qz * 4) * qh). */

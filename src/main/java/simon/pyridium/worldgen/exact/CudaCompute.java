@@ -57,7 +57,7 @@ public final class CudaCompute implements GpuCompute {
         final @Nullable MethodHandle funcLoad;
         final MethodHandle init, deviceGetCount, deviceGet, deviceGetName, deviceGetAttribute, primaryCtxRetain, primaryCtxRelease,
                 ctxSetCurrent, streamCreate, streamSynchronize, streamDestroy, moduleLoadData, moduleGetFunction, moduleGetGlobal,
-                moduleUnload, memAlloc, memFree, memsetD8, memAllocHost, memFreeHost, memcpyHtoD, memcpyHtoDAsync, memcpyDtoHAsync,
+                moduleUnload, memAlloc, memGetInfo, memFree, memsetD8, memAllocHost, memFreeHost, memcpyHtoD, memcpyHtoDAsync, memcpyDtoHAsync,
                 memcpyDtoDAsync, memcpy2DAsync, memsetD8Async, launchKernel, eventCreate, eventRecord, eventSynchronize, eventElapsedTime, eventDestroy, getErrorName;
 
         Api(SymbolLookup lib) {
@@ -78,6 +78,7 @@ public final class CudaCompute implements GpuCompute {
             moduleGetGlobal = fn(lib, "cuModuleGetGlobal_v2", PTR, PTR, PTR, PTR);
             moduleUnload = fn(lib, "cuModuleUnload", PTR);
             memAlloc = fn(lib, "cuMemAlloc_v2", PTR, LONG);
+            memGetInfo = fn(lib, "cuMemGetInfo_v2", PTR, PTR);
             memFree = fn(lib, "cuMemFree_v2", LONG);
             memsetD8 = fn(lib, "cuMemsetD8_v2", LONG, ValueLayout.JAVA_BYTE, LONG);
             memAllocHost = fn(lib, "cuMemAllocHost_v2", PTR, LONG);
@@ -233,6 +234,17 @@ public final class CudaCompute implements GpuCompute {
     // Puffer
     // ---------------------------------------------------------------------------------------
 
+    /** Freier VRAM in Bytes (aller Prozesse): Arbeitspuffer richten sich danach, nicht nach festen Groessen. */
+    @Override
+    public long freeMemory() {
+        current();
+        try (Arena a = Arena.ofConfined()) {
+            MemorySegment f = a.allocate(LONG), t = a.allocate(LONG);
+            call(cu.memGetInfo, "cuMemGetInfo", f, t);
+            return f.get(LONG, 0);
+        }
+    }
+
     private long allocDevice(long size) {
         try (Arena a = Arena.ofConfined()) {
             MemorySegment p = a.allocate(LONG);
@@ -350,8 +362,13 @@ public final class CudaCompute implements GpuCompute {
         final MemorySegment function;
         final int block, bindings;
         long[] bound;
-        long bindingHost;
+        /** Ring gepinnter Bindungs-Staging-Puffer: jede neue Bindung bekommt einen eigenen Platz, damit keine Stream-Synchronisation noetig ist */
+        long bindingRing, bindingHost;
+        int ringPos, ringUsed;
+        long ringEpoch;
         boolean closed;
+        static final int RING = 1024;
+        static final boolean NO_RING = Boolean.getBoolean("pyridium.noBindRing");
 
         CudaKernel(byte[] ptx, String entry, int bindings, int block) {
             this.block = block;
@@ -382,9 +399,22 @@ public final class CudaCompute implements GpuCompute {
             long[] ptrs = new long[bindings];
             for (int i = 0; i < bufs.length; i++) ptrs[i] = bufs[i][0];
             if (Arrays.equals(bound, ptrs)) return;
-            // An earlier queued copy may still read this pinned source.
-            if (bound != null) sync();
-            if (bindingHost == 0) bindingHost = allocHost(Math.max(8, 8L * bindings));
+            // Frueher eingereihte Kopien lesen noch ihren Staging-Platz: jede Bindung bekommt einen neuen aus dem Ring,
+            // statt den Stream zu leeren (das hat die GPU bei jedem Batch und jeder Stufe leerlaufen lassen).
+            long stride = Math.max(8, 8L * bindings);
+            if (NO_RING && bound != null) sync();
+            if (bindingRing == 0) bindingRing = allocHost(stride * RING);
+            if (ringEpoch != syncEpoch) {
+                ringEpoch = syncEpoch;
+                ringUsed = 0;
+            }
+            if (++ringUsed >= RING) {
+                sync();
+                ringEpoch = syncEpoch;
+                ringUsed = 1;
+            }
+            ringPos = NO_RING ? 0 : (ringPos + 1) % RING;
+            bindingHost = bindingRing + ringPos * stride;
             MemorySegment.ofAddress(bindingHost).reinterpret(8L * bindings).copyFrom(MemorySegment.ofArray(ptrs));
             bound = ptrs;
         }
@@ -510,7 +540,7 @@ public final class CudaCompute implements GpuCompute {
      */
     public void readStrided(long dst, long src, long stride, long off, long len, int n) {
         readStridedAsync(dst, src, stride, off, len, n);
-        call(cu.streamSynchronize, "cuStreamSynchronize", stream);
+        sync();
     }
 
     /** wie {@link #readStrided}, ohne zu warten (Zielspeicher gepinnt) */
@@ -555,9 +585,13 @@ public final class CudaCompute implements GpuCompute {
         if (bytes > 0) call(cu.memcpyDtoHAsync, "Download", MemorySegment.ofAddress(host), dev, bytes, stream);
     }
 
+    /** zaehlt Synchronisationen: danach darf der Bindungs-Ring von vorn belegt werden */
+    private long syncEpoch;
+
     public void sync() {
         current();
         call(cu.streamSynchronize, "cuStreamSynchronize", stream);
+        syncEpoch++;
     }
 
     @Override
@@ -570,7 +604,7 @@ public final class CudaCompute implements GpuCompute {
                 if (readback.contains(c[1])) call(cu.memcpyDtoHAsync, "Readback", MemorySegment.ofAddress(c[1]), c[0], c[2], stream);
                 else call(cu.memcpyDtoDAsync, "Kopie", c[1], c[0], c[2], stream);
             }
-            call(cu.streamSynchronize, "cuStreamSynchronize", stream);
+            sync();
             return (System.nanoTime() - t0) / 1e6;
         }
     }
@@ -581,7 +615,7 @@ public final class CudaCompute implements GpuCompute {
         try (Arena a = Arena.ofConfined()) {
             List<MemorySegment> events = new ArrayList<>();
             record(a, list, events);
-            call(cu.streamSynchronize, "cuStreamSynchronize", stream);
+            sync();
             double[] out = new double[list.size()];
             MemorySegment ms = a.allocate(ValueLayout.JAVA_FLOAT);
             for (int i = 0; i < out.length; i++) {
