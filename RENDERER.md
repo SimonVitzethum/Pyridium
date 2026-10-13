@@ -474,4 +474,26 @@ Staging-Umlauf, explizite Diagnose (`PYRIT_REPLAY_STATS`, `reportHistory`).
   verzögert, Voxeldaten unberührt.
 - Tests: `zig build test` (66 Tests, +3 für `parseGiEvery`/`giShouldRun`,
   Kamera-Reuse, Reprojektions-Match) und `./gradlew compileClientJava`.
-  GPU-Ersparnis noch nicht vermessen (Einzellauf steht aus).
+- **Gemessen (Serie 2, 13.10.2026, RTX 5070 Laptop, 1920×1080 nativ,
+  1024 Chunks, Nativmodus, Duty 1, je 300 s, Skript
+  `/tmp/opencode/bench_series2.sh`):** Per-Pass-Sektionen aus
+  `GPU-Zeit je Frame (60)`, je Lauf ~36k sichtbar / ~47k resident / 0 offen.
+  GI-Sektion (`GI schattieren` + `GI RT`, Mittel): **9,2 ms (every) →
+  3,0 ms (EVERY=2) → 2,0 ms (EVERY=3)**; Bild+RT unverändert (~25 ms).
+  Der Skip greift exakt wie konstruiert (Dosis-Wirkung stimmt); der Rest des
+  Frames läuft unverändert weiter. Summen sind durch LOD-Aufbau bis kurz vor
+  Laufende verfälscht (Streaming-Sektionen) und werden daher nicht als
+  Totale ausgewiesen.
+- **FPS folgen der GPU-Ersparnis hier nicht:** ~8–9 FPS in allen Läufen
+  (Frame ~111 ms bei ~40 ms GPU) — der Headless-Frame ist CPU-seitig gebunden
+  (Present/Sync/Java-Overhead), nicht GPU-seitig. Für das 6-ms-Ziel muss die
+  CPU-Seite mit (Phase 6 des Plans), sonst kommt keine GPU-Ersparnis an.
+- **Statischer Reuse griff in keinem Lauf** (0 Treffer, auch entity-frei +
+  `NOTIME` + `NOJITTER`): Lebendige Welten ändern pro Frame Posen/Instanzen
+  (Welt-Entities auch ohne Test-Fixtures), die strikte Entwertung greift
+  korrekterweise immer. Realer Wert in Live-Szenen ≈ 0; pausierte/echt
+  eingefrorene Szenen bleiben ungeprüft. `staticbare` (entity-frei) belegt
+  dabei: Bild+RT 17 ms statt 25 ms (Entity-DAG weg), ~20 FPS.
+- **Qualität GI3:** Aufnahme Baseline vs. EVERY=3 (gleiche Szene/Kamera)
+  mit dem Auge identisch — Schatten, Wasser, Himmel, Entities unverändert.
+  Im Stand kostet GI3 nichts Sichtbares; Bewegung bleibt Einzelexperiment.
