@@ -1,0 +1,14 @@
+{
+  "name": "Standard (Noble-inspiriert)",
+  "version": "1.0",
+  "abi": 1,
+  "author": "Pyridium",
+  "license": "GPL-3.0-or-later",
+  "options": [
+    { "id": "vibrance", "type": "float", "min": 0.0, "max": 1.0, "default": 0.15, "label": "Lebendigkeit" },
+    { "id": "shoulder", "type": "float", "min": 0.5, "max": 0.95, "default": 0.76, "label": "Schulter (Beginn der Lichterkompression)" },
+    { "id": "white_desat", "type": "float", "min": 0.0, "max": 1.0, "default": 0.15, "label": "Entsaettigung heller Lichter" },
+    { "id": "sky_ms", "type": "float", "min": 1.0, "max": 3.0, "default": 2.0, "label": "Himmelshelligkeit (Mehrfachstreuung)" },
+    { "id": "stars", "type": "float", "min": 0.0, "max": 3.0, "default": 1.0, "label": "Sterne (Nacht)" }
+  ]
+}

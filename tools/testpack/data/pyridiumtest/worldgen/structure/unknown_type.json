@@ -1,0 +1,7 @@
+{
+ "type": "pyridiumtest:made_up_type",
+ "biomes": "#pyridiumtest:has_test_outpost",
+ "step": "surface_structures",
+ "spawn_overrides": {},
+ "terrain_adaptation": "none"
+}

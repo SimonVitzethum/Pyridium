@@ -1,0 +1,14 @@
+{
+ "structures": [
+  {
+   "structure": "pyridiumtest:unknown_type",
+   "weight": 1
+  }
+ ],
+ "placement": {
+  "type": "minecraft:random_spread",
+  "spacing": 7,
+  "separation": 3,
+  "salt": 20260102
+ }
+}

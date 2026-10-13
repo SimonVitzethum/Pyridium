@@ -1,0 +1,31 @@
+// SNIPPET (not compiled here: needs the structure agent's wg_struct_query.cuh / StructureGpu from worktree agent-a6c635dc832b86664).
+// Rename to cuda/wg_full_struct.cu after merging. Stage kernel for FullChunkPipeline.addStage (stageMask bit 4):
+// one block (256 threads) per chunk, thread = column; blockIdx.x = chunk. Bindings (kernel.bind order):
+//   0 chunkXZ (terrain.chunkBuffer), 1 states (pipeline.stateBuffer), 2 flags (F_*), 5 cfg, 6 = StructureGpu.viewBuffer()
+// Java: pipeline.addStage(new GpuCompute.Dispatch(kStruct, new int[8], 1, 0));   // FullChunkPipeline.run launches it as grid (gx=1, gy=chunks), push[0]=chunks
+#include "wg_full_common.cuh"
+#include "wg_struct_query.cuh"
+
+extern "C" __global__ void __launch_bounds__(256) wg_full_struct(FullPush p)
+{
+    int c = blockIdx.y;
+    if (c >= p.a[0]) return;
+    int tid = threadIdx.x;
+    const int minY = gCfg[CFG_MINY], H = gCfg[CFG_HEIGHT];
+    const StructTables& T = *(const StructTables*)vf_b[6];
+    int x0 = gChunkXZ[c * 2], z0 = gChunkXZ[c * 2 + 1];
+    int lz = tid & 15, lx = tid >> 4;
+    int* col = gStates + (size_t)c * H * 256 + lz + lx * 16;
+    // surface height of the column = first free block above the highest non-air
+    int surf = minY;
+    for (int yi = H - 1; yi >= 0; yi--) if (!(gFlags[col[yi * 256] & 0x3fffffff] & F_AIR)) { surf = minY + yi + 1; break; }
+    StructCol sc;
+    struct_columnBegin(T, sc, x0 + lx, z0 + lz, 1, surf);
+    if (!sc.n) return;
+    for (int yi = 0; yi < H; yi++) {
+        uint s = struct_columnAt(T, sc, minY + yi);
+        if (s) col[yi * 256] = (int)(s & 0x7fffffffu);       // 0 = structure air (clears terrain), else block state id
+    }
+}
+// Note: the structure generator (StructureGpu.generateAsync(cx0, cz0, cw, cd)) must have produced the starts/pieces for every chunk of
+// the batch (+ margin = max piece reach) BEFORE this stage runs on the same stream.

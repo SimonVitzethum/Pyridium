@@ -1,0 +1,10 @@
+{
+  "name": "Flat Colours",
+  "version": "1.0",
+  "abi": 1,
+  "author": "Pyridium",
+  "license": "GPL-3.0-or-later",
+  "options": [
+    { "id": "levels", "type": "float", "min": 2, "max": 16, "default": 5, "label": "Farbstufen" }
+  ]
+}
